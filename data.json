@@ -1,0 +1,36 @@
+{
+  "users": [
+    {
+      "id": "testuser-1781028575013",
+      "username": "testuser",
+      "shopName": "Shop",
+      "phone": "9999999999",
+      "passwordHash": "$2a$12$GHwb3avnsMrL5jrscR71mO3mzRBxuMIdn3eoLx0fSqoPZArlZD9i6",
+      "createdAt": "2026-06-09T18:09:35.013Z"
+    },
+    {
+      "id": "testuser2-1781028869005",
+      "username": "testuser2",
+      "shopName": "Shop",
+      "phone": "9999999999",
+      "passwordHash": "$2a$12$C0BbYcWfYxnGSvBEY/KTQ.MmjQ3c9QXlNZNO8J5ynTrbtYJcjs1z6",
+      "createdAt": "2026-06-09T18:14:29.005Z"
+    },
+    {
+      "id": "ashutosh katare-1781031517583",
+      "username": "ashutosh katare",
+      "shopName": "Best Choice Stationery And Gift Gallery",
+      "phone": "9425160194",
+      "passwordHash": "$2a$12$6yHaW2c9LLpf3GQUSxgiduiz9x.CAnp.TCcV67Hi4d81cCblmvlzi",
+      "createdAt": "2026-06-09T18:58:37.583Z"
+    },
+    {
+      "id": "fdfgasfg-1781083856834",
+      "username": "fdfgasfg",
+      "shopName": "gfasdga",
+      "phone": "",
+      "passwordHash": "$2a$12$NqNn93zVxN2RexZEyDulROlcPndCoCPVHcMTuy/lD2.2YMNABPN/C",
+      "createdAt": "2026-06-10T09:30:56.834Z"
+    }
+  ]
+}

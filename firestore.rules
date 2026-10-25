@@ -1,0 +1,175 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Helper Functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == "hardikkatare10@gmail.com" ||
+        request.auth.token.email == "admin@billpilot.app" ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isApprovedShopkeeper() {
+      return isSignedIn() && (
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'shopkeeper' &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.shopkeeperStatus == 'approved') ||
+        isAdmin()
+      );
+    }
+
+    function isShopOwner(shopId) {
+      let shopPath = /databases/$(database)/documents/shops/$(shopId);
+      let userPath = /databases/$(database)/documents/users/$(request.auth.uid);
+      return isSignedIn() && exists(shopPath) && (
+        get(shopPath).data.ownerId == request.auth.uid ||
+        (exists(userPath) &&
+         get(userPath).data.role == 'shopkeeper' &&
+         get(userPath).data.shopkeeperStatus == 'approved' &&
+         get(userPath).data.shopId == shopId)
+      );
+    }
+
+    // Healthcheck / Connection test endpoint
+    match /test/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // 2. User Profiles & Role Authorization
+    match /users/{userId} {
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      
+      // Customers register directly; shopkeepers remain pending until an administrator approves them.
+      allow create: if isSignedIn() && request.auth.uid == userId
+        && incoming().id == userId
+        && (
+          (incoming().role == 'customer' && incoming().requestedRole == 'customer' && incoming().shopkeeperStatus == 'none') ||
+          (incoming().role == 'shopkeeper' && incoming().requestedRole == 'shopkeeper' && incoming().shopkeeperStatus == 'pending') ||
+          isAdmin()
+        );
+
+      // Normal users CANNOT promote themselves or change role/status
+      allow update: if isSignedIn() && (
+        (request.auth.uid == userId && !incoming().diff(existing()).affectedKeys().hasAny(['role', 'requestedRole', 'shopkeeperStatus', 'shopId', 'id', 'email']))
+        || isAdmin()
+      );
+
+      allow delete: if isAdmin();
+
+      // Private cloud synchronization key-value store for BillPilot Shopkeeper ERP
+      match /kv/{documentId} {
+        allow read, create, update, delete: if isSignedIn() && request.auth.uid == userId;
+      }
+    }
+
+    // 3. Shops Collection
+    match /shops/{shopId} {
+      allow read: if true; // Public marketplace discovery
+
+      // Only registered users can register a shop, always in pending verification status
+      allow create: if isSignedIn()
+        && incoming().ownerId == request.auth.uid
+        && (incoming().verificationStatus == 'pending' || isAdmin());
+
+      // Shop owners can update shop settings/hours/delivery, but cannot self-verify
+      allow update: if isSignedIn() && (
+        (existing().ownerId == request.auth.uid && incoming().ownerId == existing().ownerId && !incoming().diff(existing()).affectedKeys().hasAny(['verificationStatus']))
+        || isAdmin()
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // 4. Products & Inventory (Single Canonical Inventory)
+    match /products/{productId} {
+      // Consumers and marketplace visitors can freely browse catalog
+      allow read: if true;
+
+      // Only approved shopkeepers can create products for their store
+      allow create: if isSignedIn()
+        && incoming().ownerId == request.auth.uid
+        && incoming().shopPrice is number && incoming().shopPrice >= 0
+        && incoming().stockQuantity is number && incoming().stockQuantity >= 0
+        && (isApprovedShopkeeper() || isAdmin());
+
+      // Product updates:
+      // A) Owning shopkeeper updates product info, prices, stock
+      // B) Atomic checkout orders decrement stockQuantity (stock must decrease and stay >= 0)
+      allow update: if isSignedIn() && (
+        (existing().ownerId == request.auth.uid && incoming().ownerId == existing().ownerId)
+        || (incoming().diff(existing()).affectedKeys().hasOnly(['stockQuantity', 'isAvailable', 'updatedAt'])
+            && incoming().stockQuantity is number
+            && incoming().stockQuantity >= 0
+            && incoming().stockQuantity <= existing().stockQuantity)
+        || isAdmin()
+      );
+
+      allow delete: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
+    }
+
+    // 5. Orders Collection
+    match /orders/{orderId} {
+      // Customers read their own orders; Shopkeepers read orders placed with their shop
+      allow get: if isSignedIn() && (
+        resource.data.customerId == request.auth.uid
+        || isShopOwner(resource.data.shopId)
+        || isAdmin()
+      );
+
+      allow list: if isSignedIn() && (
+        resource.data.customerId == request.auth.uid
+        || isShopOwner(resource.data.shopId)
+        || isAdmin()
+      );
+
+      // Authenticated customers can place orders with validated non-negative total
+      allow create: if isSignedIn()
+        && incoming().customerId == request.auth.uid
+        && incoming().totalAmount is number && incoming().totalAmount > 0;
+
+      // Order status updates:
+      // Customer: cancellation / return request on own order
+      // Shopkeeper: order status lifecycle (accepted, preparing, out_for_delivery, delivered)
+      allow update: if isSignedIn() && (
+        (existing().customerId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'statusHistory', 'updatedAt', 'cancellationReason']))
+        || isShopOwner(existing().shopId)
+        || isAdmin()
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // 6. Admin directory and area configurations
+    match /areas/{areaId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /admins/{adminId} {
+      allow read: if isSignedIn() && request.auth.uid == adminId;
+      allow write: if false;
+    }
+
+    // 7. Global Default Deny for any unmapped paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

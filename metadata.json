@@ -1,0 +1,6 @@
+{
+  "name": "BillPilot",
+  "description": "Billing and Inventory App with Firebase Authentication, Firestore cloud sync, and POS integration",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
