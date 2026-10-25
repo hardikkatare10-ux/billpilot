@@ -281,15 +281,16 @@ export const AuthModal: React.FC = () => {
                       placeholder="Enter password (min. 6 characters)..."
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      className="w-full px-3 py-2.5 pr-10 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2.5 pr-16 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-blue-500"
                     />
                     <button
                       type="button"
                       onClick={() => setShowPassword((visible) => !visible)}
                       aria-label={showPassword ? 'Hide password' : 'Show password'}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-700"
+                      className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700"
                     >
                       {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      <span>{showPassword ? 'Hide' : 'Show'}</span>
                     </button>
                   </div>
                 </div>

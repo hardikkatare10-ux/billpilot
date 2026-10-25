@@ -266,20 +266,34 @@ export default function AuthScreen({
                   type: "password",
                 },
               ].map(({ label, key, placeholder, type }) => (
-                <div key={key}>
+                <div key={key} className={type === "password" ? "relative" : undefined}>
                   <label className="block text-xs font-medium text-muted-foreground mb-1">
                     {label}
                   </label>
                   <input
-                    type={type}
+                    type={type === "password" && showPassword ? "text" : type}
                     value={setup[key]}
                     onChange={(e) => {
                       setSetup((s) => ({ ...s, [key]: e.target.value }));
                       setError("");
                     }}
                     placeholder={placeholder}
-                    className="w-full px-3.5 py-2.5 bg-background border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    className={`w-full px-3.5 py-2.5 ${type === "password" ? "pr-10" : ""} bg-background border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/30`}
                   />
+                  {type === "password" && (
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((visible) => !visible)}
+                      aria-label={showPassword ? "Hide password" : "Show password"}
+                      className="absolute right-3 top-[34px] text-muted-foreground hover:text-foreground"
+                    >
+                      {showPassword ? (
+                        <EyeOff className="w-4 h-4" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
+                    </button>
+                  )}
                 </div>
               ))}
 
