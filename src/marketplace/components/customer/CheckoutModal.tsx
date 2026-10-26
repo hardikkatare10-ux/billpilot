@@ -330,7 +330,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ onClose, onOrderPl
               Payment Method
             </span>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3">
               <label
                 className={`flex flex-col p-3 rounded-xl border text-xs cursor-pointer transition-colors ${
                   paymentMethod === 'cash_on_delivery'
@@ -356,30 +356,6 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ onClose, onOrderPl
                 </p>
               </label>
 
-              <label
-                className={`flex flex-col p-3 rounded-xl border text-xs cursor-pointer transition-colors ${
-                  paymentMethod === 'online_upi_card'
-                    ? 'border-blue-600 bg-blue-50/40 ring-1 ring-blue-600'
-                    : 'border-slate-200 hover:bg-slate-50'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <CreditCard className="w-4 h-4 text-blue-600" />
-                    <span className="font-bold text-slate-900">UPI / Online Pay</span>
-                  </div>
-                  <input
-                    type="radio"
-                    name="payment_method"
-                    checked={paymentMethod === 'online_upi_card'}
-                    onChange={() => setPaymentMethod('online_upi_card')}
-                    className="text-blue-600 focus:ring-blue-500 cursor-pointer"
-                  />
-                </div>
-                <p className="text-[11px] text-slate-500 mt-2">
-                  Pre-authorized online payment via UPI QR, GPay, PhonePe, or Cards.
-                </p>
-              </label>
             </div>
           </div>
 
