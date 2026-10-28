@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Shopkeeper Operations Dashboard
+ * NearBasket - Shopkeeper Operations Dashboard
  * 
  * Order board for managing incoming orders, fulfillment progression,
  * and delivery OTP verification at doorstep handover.

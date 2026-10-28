@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Geographical & Area Directory Utilities
+ * NearBasket - Geographical & Area Directory Utilities
  * 
  * Includes high-precision Haversine distance calculations,
  * coordinates validation, and bulk CSV/JSON import parsers.

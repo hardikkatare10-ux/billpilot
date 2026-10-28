@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Cart Drawer and Single-Shop Cross-Store Interceptor
+ * NearBasket - Cart Drawer and Single-Shop Cross-Store Interceptor
  * 
  * Enforces one shop per order and displays itemized cost breakdowns.
  */

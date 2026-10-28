@@ -1,5 +1,5 @@
 /**
- * BillPilot - Unified Acceptance Scenarios Test Suite
+ * Dukan Yantra and NearBasket - Unified Acceptance Scenarios Test Suite
  * 
  * Verifies Phase 10 acceptance scenarios:
  * 1. Consumer registration & marketplace access
@@ -29,7 +29,7 @@ import { dbStore, sanitizePincodes } from '../../marketplace/services/db/store';
 import { productToShopListing } from '../../marketplace/services/firebase/productService';
 import type { FirestoreProduct, Shop, User, Order } from '../../marketplace/types';
 
-describe('Unified BillPilot & BillPilot Local Integration', () => {
+describe('Unified Dukan Yantra & NearBasket Integration', () => {
   const testShopId = 'shop_test_101';
   const testOwnerId = 'user_merchant_101';
   const testCustomerId = 'user_customer_202';
@@ -119,11 +119,11 @@ describe('Unified BillPilot & BillPilot Local Integration', () => {
     expect(listing.productId).toBe(canonicalProduct.id);
   });
 
-  it('5. BillPilot ERP product changes upsert the matching Local listing and stock', () => {
+  it('5. Dukan Yantra ERP product changes upsert the matching NearBasket listing and stock', () => {
     const shopId = `shop_billpilot_sync_${Date.now()}`;
     dbStore.addShop({
       id: shopId,
-      name: 'BillPilot Sync Shop',
+      name: 'Dukan Yantra Sync Shop',
       ownerId: 'owner_sync_test',
       ownerName: 'Sync Owner',
       phone: '9876543210',

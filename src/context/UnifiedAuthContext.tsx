@@ -1,8 +1,8 @@
 /**
- * BillPilot - Unified Authentication & Role Authorization Context
+ * Dukan Yantra and NearBasket - Unified Authentication & Role Authorization Context
  * 
  * Implements Phase 4:
- * - Single Firebase Authentication system across BillPilot and BillPilot Local
+ * - Single Firebase Authentication system across Dukan Yantra and NearBasket
  * - Role-based authorization: Consumer vs Shopkeeper vs Admin
  * - Safe shopkeeper approval flow (selecting Shopkeeper NEVER grants immediate privileged access)
  * - Anti-tampering protection against browser state / localStorage privilege escalation
@@ -312,7 +312,7 @@ export const UnifiedAuthProvider: React.FC<{ children: React.ReactNode }> = ({ c
           verificationDetails: {
             gstin: input.shopDetails.gstin,
             tradeLicenseNo: input.shopDetails.tradeLicenseNo,
-            notes: 'Applied during BillPilot merchant onboarding. Pending admin review.',
+            notes: 'Applied during Dukan Yantra merchant onboarding. Pending admin review.',
           },
           address: {
             street: input.shopDetails.street.trim(),

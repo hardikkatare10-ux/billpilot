@@ -172,7 +172,7 @@ export function InventoryImport({ products, onImport, onClose }: InventoryImport
           <h3 className="flex items-center gap-2 font-semibold text-foreground">
             <FileSpreadsheet className="h-5 w-5 text-primary" /> Import products from Excel or CSV
           </h3>
-          <p className="mt-1 text-xs text-muted-foreground">Imports into this BillPilot account’s local inventory only. Marketplace listings are not changed.</p>
+          <p className="mt-1 text-xs text-muted-foreground">Imports into this Dukan Yantra account’s local inventory only. Marketplace listings are not changed.</p>
         </div>
         <button type="button" onClick={onClose} className="rounded-lg p-1.5 text-muted-foreground hover:bg-muted" aria-label="Close import">
           <X className="h-4 w-4" />
@@ -233,7 +233,7 @@ export function InventoryImport({ products, onImport, onClose }: InventoryImport
             <div className="overflow-x-auto rounded-lg border border-border">
               <table className="w-full min-w-[760px] text-left text-xs">
                 <thead className="bg-muted/40 text-muted-foreground">
-                  <tr><th className="px-3 py-2">Original source header</th><th className="px-3 py-2">Sample values</th><th className="px-3 py-2">Detection status</th><th className="px-3 py-2">BillPilot field</th></tr>
+                  <tr><th className="px-3 py-2">Original source header</th><th className="px-3 py-2">Sample values</th><th className="px-3 py-2">Detection status</th><th className="px-3 py-2">Dukan Yantra field</th></tr>
                 </thead>
                 <tbody>
                   {sheet.headerLabels.map((header, index) => (

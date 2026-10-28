@@ -1,8 +1,8 @@
 /**
- * BillPilot Local - BillPilot ERP Synchronization Hub
+ * NearBasket - Dukan Yantra ERP Synchronization Hub
  * 
  * Standalone bidirectional integration module connecting shop catalogue,
- * stock levels, and sales orders with the BillPilot ERP application.
+ * stock levels, and sales orders with the Dukan Yantra ERP application.
  */
 
 import React, { useState } from 'react';
@@ -100,13 +100,13 @@ export const BillPilotSyncHub: React.FC<BillPilotSyncHubProps> = ({
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-4">
         <div>
           <div className="flex items-center gap-2">
-            <h1 className="text-xl font-bold text-slate-900">BillPilot Integration Engine</h1>
+            <h1 className="text-xl font-bold text-slate-900">Dukan Yantra Integration Engine</h1>
             <span className="text-xs px-2 py-0.5 bg-emerald-50 text-emerald-700 font-semibold rounded border border-emerald-200">
               API Contract v1.0
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-0.5">
-            Bi-directional synchronization layer connecting storefront orders with BillPilot inventory and invoice ledgers.
+            Bi-directional synchronization layer connecting storefront orders with Dukan Yantra inventory and invoice ledgers.
           </p>
         </div>
 
@@ -123,7 +123,7 @@ export const BillPilotSyncHub: React.FC<BillPilotSyncHubProps> = ({
         <div className="flex items-center justify-between border-b border-slate-100 pb-3">
           <div className="flex items-center gap-2">
             <Globe className="w-4 h-4 text-blue-600" />
-            <h3 className="font-bold text-slate-900 text-sm">BillPilot API Endpoint & Credentials</h3>
+            <h3 className="font-bold text-slate-900 text-sm">Dukan Yantra API Endpoint & Credentials</h3>
           </div>
           <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded flex items-center gap-1">
             <CheckCircle2 className="w-3.5 h-3.5" />
@@ -140,7 +140,7 @@ export const BillPilotSyncHub: React.FC<BillPilotSyncHubProps> = ({
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label className="font-semibold text-slate-700 block mb-1">
-              BillPilot API Base URL
+              Dukan Yantra API Base URL
             </label>
             <input
               type="url"
@@ -156,7 +156,7 @@ export const BillPilotSyncHub: React.FC<BillPilotSyncHubProps> = ({
 
           <div>
             <label className="font-semibold text-slate-700 block mb-1">
-              Merchant ID (BillPilot ERP)
+              Merchant ID (Dukan Yantra ERP)
             </label>
             <input
               type="text"
@@ -235,7 +235,7 @@ export const BillPilotSyncHub: React.FC<BillPilotSyncHubProps> = ({
         <div>
           <h3 className="text-sm font-bold text-white">Manual Synchronization Handshakes</h3>
           <p className="text-xs text-slate-300 mt-0.5">
-            Trigger bidirectional catalog and order updates directly with the configured BillPilot ERP service.
+            Trigger bidirectional catalog and order updates directly with the configured Dukan Yantra ERP service.
           </p>
         </div>
 
@@ -255,7 +255,7 @@ export const BillPilotSyncHub: React.FC<BillPilotSyncHubProps> = ({
             className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white font-medium text-xs rounded-xl border border-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer"
           >
             <ArrowUpRight className="w-3.5 h-3.5 text-blue-400" />
-            Export Accepted Orders to BillPilot ERP
+            Export Accepted Orders to Dukan Yantra ERP
           </button>
         </div>
 

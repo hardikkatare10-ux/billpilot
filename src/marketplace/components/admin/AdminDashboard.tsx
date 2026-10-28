@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Marketplace Administrator Control Center
+ * NearBasket - Marketplace Administrator Control Center
  * 
  * Provides administrative governance over shop verification, dispute resolution,
  * commission settlements, system audit logs, and global ERP synchronization.
@@ -222,7 +222,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           { key: 'orders', label: `All Orders (${orders.length})`, icon: FileText },
           { key: 'disputes', label: `Disputes & Returns (${disputes.length})`, icon: AlertTriangle },
           { key: 'commissions', label: 'Commission Ledger', icon: DollarSign },
-          { key: 'sync', label: `BillPilot Sync (${syncEvents.length})`, icon: Activity },
+          { key: 'sync', label: `Dukan Yantra Sync (${syncEvents.length})`, icon: Activity },
           { key: 'audit', label: `Audit Logs (${auditLogs.length})`, icon: ShieldCheck },
         ].map((tab) => {
           const Icon = tab.icon;
@@ -655,7 +655,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
-      {/* TAB 5: BillPilot Sync Ledger */}
+      {/* TAB 5: Dukan Yantra Sync Ledger */}
       {activeTab === 'sync' && (
         <div className="space-y-4">
           {syncEvents.length === 0 ? (
@@ -663,7 +663,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <Activity className="w-8 h-8 text-slate-300 mx-auto" />
               <p className="font-semibold text-slate-700 text-sm">No ERP sync logs recorded</p>
               <p className="text-slate-400 max-w-sm mx-auto">
-                Inventory synchronization and invoice push events between BillPilot Local and BillPilot ERP will appear here.
+                Inventory synchronization and invoice push events between NearBasket and Dukan Yantra will appear here.
               </p>
             </div>
           ) : (

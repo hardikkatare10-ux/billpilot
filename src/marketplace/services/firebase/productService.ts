@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Firestore Product & Inventory Real-Time Service
+ * NearBasket - Firestore Product & Inventory Real-Time Service
  * 
  * Manages real-time synchronization between Shopkeeper Inventory Dashboard
  * and Customer Marketplace via Firestore onSnapshot() listeners.

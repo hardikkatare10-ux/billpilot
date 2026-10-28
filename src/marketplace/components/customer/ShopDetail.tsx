@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Shop Detail & Catalogue View
+ * NearBasket - Shop Detail & Catalogue View
  * 
  * Displays shop-specific prices, live stock levels, delivery policies,
  * and allows adding items into the single-shop cart with real-time Firestore sync.

@@ -1,5 +1,5 @@
 /**
- * Cloud sync for BillPilot.
+ * Cloud sync for Dukan Yantra.
  *
  * localStorage stays the source of truth while the app runs (so billing keeps working offline).
  * Every `billpro_*` key is mirrored to Firestore under  users/{uid}/kv/{key}.

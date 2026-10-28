@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Firebase Client SDK Re-Export & Security Handlers
+ * NearBasket - Firebase Client SDK Re-Export & Security Handlers
  * 
  * Re-uses unified Firebase App, Authentication, and Firestore instances from src/lib/firebase.ts.
  * Eliminates duplicate Firebase app initializations.

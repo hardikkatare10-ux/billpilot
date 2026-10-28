@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Official India Post Directory & PIN Code Resolver
+ * NearBasket - Official India Post Directory & PIN Code Resolver
  * 
  * Queries official Government of India Post Office records for any 6-digit Indian PIN code.
  * Provides district, state, and list of all branch post offices under that PIN code,

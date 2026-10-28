@@ -1,8 +1,8 @@
 /**
- * BillPilot Local - Main Application Entry
+ * NearBasket - Main Application Entry
  * 
  * Standalone neighborhood commerce platform connecting local customers
- * with neighborhood merchants, shop-managed deliveries, and BillPilot ERP sync.
+ * with neighborhood merchants, shop-managed deliveries, and Dukan Yantra ERP sync.
  */
 
 import React, { useState, useEffect } from 'react';

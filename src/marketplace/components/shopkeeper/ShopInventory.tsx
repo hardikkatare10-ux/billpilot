@@ -1,8 +1,8 @@
 /**
- * BillPilot Local - Shopkeeper Inventory Management
+ * NearBasket - Shopkeeper Inventory Management
  * 
  * Manages shop-specific prices, sale discounts, stock quantities, product details,
- * and BillPilot ERP references with real-time Firestore synchronization.
+ * and Dukan Yantra ERP references with real-time Firestore synchronization.
  */
 
 import React, { useState, useEffect } from 'react';
@@ -565,7 +565,7 @@ export const ShopInventory: React.FC<ShopInventoryProps> = ({ shopId, onRefresh 
               </div>
 
               <div>
-                <label className="font-semibold text-slate-700 block mb-1">BillPilot ERP Item SKU</label>
+                <label className="font-semibold text-slate-700 block mb-1">Dukan Yantra ERP Item SKU</label>
                 <input
                   type="text"
                   placeholder="Optional SKU"
@@ -745,7 +745,7 @@ export const ShopInventory: React.FC<ShopInventoryProps> = ({ shopId, onRefresh 
               </div>
 
               <div>
-                <label className="font-semibold text-slate-700 block mb-1">BillPilot ERP Item SKU</label>
+                <label className="font-semibold text-slate-700 block mb-1">Dukan Yantra ERP Item SKU</label>
                 <input
                   type="text"
                   placeholder="Optional SKU (e.g. BP-SKU-990)"

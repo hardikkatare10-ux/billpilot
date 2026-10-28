@@ -1,6 +1,6 @@
 {
-  "name": "BillPilot",
-  "description": "Billing and Inventory App with Firebase Authentication, Firestore cloud sync, and POS integration",
+  "name": "Dukan Yantra | NearBasket",
+  "description": "Dukan Yantra billing and inventory software connected with the NearBasket local shopping marketplace",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

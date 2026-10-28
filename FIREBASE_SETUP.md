@@ -1,4 +1,4 @@
-# Firebase setup for Bill Pilot
+# Firebase setup for Dukan Yantra and NearBasket
 
 ## What is already in this project
 

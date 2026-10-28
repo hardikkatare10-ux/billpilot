@@ -1,8 +1,8 @@
 /**
- * BillPilot Local - GST Tax Invoice Modal
+ * NearBasket - GST Tax Invoice Modal
  * 
  * Generates an authentic, printable GST tax invoice with line items,
- * tax rate breakdown, BillPilot ERP invoice ID, and seller credentials.
+ * tax rate breakdown, Dukan Yantra ERP invoice ID, and seller credentials.
  */
 
 import React from 'react';
@@ -160,7 +160,7 @@ export const InvoiceModal: React.FC<InvoiceModalProps> = ({ order, onClose }) =>
               <CheckCircle className="w-3.5 h-3.5" />
               <span>Verified Delivery via OTP Handshake</span>
             </div>
-            <span>Powered by BillPilot Local Marketplace</span>
+            <span>Powered by NearBasket Marketplace</span>
           </div>
         </div>
       </div>

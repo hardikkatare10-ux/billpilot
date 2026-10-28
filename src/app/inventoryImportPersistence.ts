@@ -20,8 +20,8 @@ export function persistImportedInventory<T extends { id: number }>(
     storage.setItem(storageKey, expected);
     saved = storage.getItem(storageKey);
   } catch {
-    throw new Error("BillPilot could not save or verify the imported products in this account's local inventory.");
+    throw new Error("Dukan Yantra could not save or verify the imported products in this account's local inventory.");
   }
-  if (saved !== expected) throw new Error("BillPilot could not confirm the inventory save.");
+  if (saved !== expected) throw new Error("Dukan Yantra could not confirm the inventory save.");
   return nextProducts;
 }

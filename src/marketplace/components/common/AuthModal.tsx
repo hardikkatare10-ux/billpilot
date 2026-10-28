@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Authentication Modal
+ * NearBasket - Authentication Modal
  * 
  * Provides authentic Sign In, Customer Registration, and Local Shop Onboarding.
  */
@@ -146,7 +146,7 @@ export const AuthModal: React.FC = () => {
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-slate-50">
           <div>
             <h2 className="text-base font-bold text-slate-900">
-              {authModalMode === 'login' && 'Sign In to BillPilot Local'}
+              {authModalMode === 'login' && 'Sign In to NearBasket'}
               {authModalMode === 'register_customer' && 'Create Customer Account'}
               {authModalMode === 'register_shopkeeper' && 'Register Local Shop (Merchant)'}
             </h2>

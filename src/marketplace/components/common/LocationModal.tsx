@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Production-Ready India-Wide Location Search & Address Selector
+ * NearBasket - Production-Ready India-Wide Location Search & Address Selector
  * 
  * Features:
  * - Google Maps Platform Places API (New) Autocomplete integration restricted to India ('in')

@@ -1,7 +1,7 @@
 
-# Bill Pilot
+# Dukan Yantra and NearBasket
 
-This project is now set up as a web app for the billing and inventory experience.
+This project brings together Dukan Yantra billing and inventory software with NearBasket, a local shopping marketplace. Both products share the existing authentication, marketplace, and synchronization integrations.
 
 ## Running the app
 

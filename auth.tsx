@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { Store, Eye, EyeOff } from "lucide-react";
+import { Eye, EyeOff } from "lucide-react";
+import dukanYantraLogo from "./src/icon.png";
 
 export interface AuthSessionUser {
   username: string;
@@ -141,10 +142,10 @@ export default function AuthScreen({
       <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden">
         {/* Header */}
         <div className="bg-gradient-to-br from-[#1e40af] to-[#0f2557] p-8 text-white text-center">
-          <div className="w-16 h-16 rounded-2xl bg-[#f59e0b] flex items-center justify-center mx-auto mb-4 shadow-lg">
-            <Store className="w-8 h-8 text-white" />
+          <div className="w-16 h-16 rounded-2xl bg-white flex items-center justify-center mx-auto mb-4 shadow-lg">
+            <img src={dukanYantraLogo} alt="Dukan Yantra logo" className="w-full h-full rounded-xl object-contain" />
           </div>
-          <h1 className="text-2xl font-bold">Bill Pilot</h1>
+          <h1 className="text-2xl font-bold">Dukan Yantra</h1>
           <p className="text-blue-200 text-sm mt-1">
             {account
               ? `Welcome back, ${account.shopName}`

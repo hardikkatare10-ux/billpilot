@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Official Indian Postal Directory Reference Data
+ * NearBasket - Official Indian Postal Directory Reference Data
  * 
  * Based on official data from:
  * - Department of Posts, Ministry of Communications, Government of India

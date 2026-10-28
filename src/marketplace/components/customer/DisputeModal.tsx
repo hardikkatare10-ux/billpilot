@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Dispute and Return Modal
+ * NearBasket - Dispute and Return Modal
  * 
  * Allows customers to submit structured return, damage, or refund claims
  * with categorized reasons and photo evidence.

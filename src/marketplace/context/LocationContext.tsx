@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Customer Delivery Location Context
+ * NearBasket - Customer Delivery Location Context
  * 
  * Manages customer's active delivery locality, coordinates,
  * and first-launch Swiggy-style location selection modal prompt.

@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Shop Discovery Component
+ * NearBasket - Shop Discovery Component
  * 
  * Clean, mobile-first marketplace storefront for discovering verified
  * neighborhood shops with real-time delivery limits and radial coverage.

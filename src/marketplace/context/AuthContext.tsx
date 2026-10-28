@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Authentication Bridge Context
+ * NearBasket - Authentication Bridge Context
  * 
  * Bridges marketplace components with UnifiedAuthContext for unified Firebase Auth.
  */

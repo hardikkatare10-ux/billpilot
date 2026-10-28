@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Core Relational Data Store
+ * NearBasket - Core Relational Data Store
  * 
  * Provides atomic operations, concurrency-safe stock updates,
  * server-side order revalidation, and persistent storage.
@@ -68,7 +68,7 @@ const DEFAULT_AUDIT_LOGS: AuditLogEntry[] = [
     action: 'SYSTEM_BOOT',
     targetEntity: 'platform',
     targetId: 'billpilot_local',
-    details: 'BillPilot Local marketplace initialized with clean empty collections.',
+    details: 'NearBasket marketplace initialized with clean empty collections.',
   },
 ];
 
@@ -569,7 +569,7 @@ class RelationalDatabaseStore {
       action: 'UPDATE_BILLPILOT_CONFIG',
       targetEntity: 'connection_configs',
       targetId: shopId,
-      details: `Configured BillPilot API URL: ${updated.apiUrl}`,
+      details: `Configured Dukan Yantra API URL: ${updated.apiUrl}`,
     });
     this.persist();
     return updated;
@@ -1203,12 +1203,12 @@ class RelationalDatabaseStore {
         issuedAt: nowIso,
       };
 
-      // Create outbound BillPilot sync event
+      // Create outbound Dukan Yantra sync event
       this.recordSyncEvent({
         shopId: order.shopId,
         direction: 'outbound_to_billpilot',
         syncType: 'order_export',
-        payloadSummary: `Order ${order.orderNumber} exported to BillPilot ERP. Sale Invoice created: ${order.invoice.billPilotInvoiceId}`,
+        payloadSummary: `Order ${order.orderNumber} exported to Dukan Yantra ERP. Sale Invoice created: ${order.invoice.billPilotInvoiceId}`,
         externalReferenceId: order.invoice.billPilotInvoiceId,
         status: 'success',
       });
@@ -1228,7 +1228,7 @@ class RelationalDatabaseStore {
         order.paymentStatus = 'refunded';
       }
 
-      // Notify BillPilot
+      // Notify Dukan Yantra
       this.recordSyncEvent({
         shopId: order.shopId,
         direction: 'outbound_to_billpilot',
@@ -1351,7 +1351,7 @@ class RelationalDatabaseStore {
     return { ...req };
   }
 
-  // --- BillPilot Sync Layer ---
+  // --- Dukan Yantra Sync Layer ---
   public getSyncEvents(shopId?: string): BillPilotSyncEvent[] {
     if (shopId) {
       return this.state.syncEvents.filter((s) => s.shopId === shopId);
@@ -1388,7 +1388,7 @@ class RelationalDatabaseStore {
         shopId,
         direction: 'inbound_to_marketplace',
         syncType,
-        payloadSummary: `Synced ${shopListings.length} products with BillPilot ERP for ${shop?.name || 'Shop'}. All stock quantities updated.`,
+        payloadSummary: `Synced ${shopListings.length} products with Dukan Yantra ERP for ${shop?.name || 'Shop'}. All stock quantities updated.`,
         externalReferenceId: `BP-SYNC-${Math.floor(1000 + Math.random() * 9000)}`,
         status: 'success',
       });
@@ -1398,7 +1398,7 @@ class RelationalDatabaseStore {
       shopId,
       direction: 'outbound_to_billpilot',
       syncType,
-      payloadSummary: `Triggered manual ${syncType} with BillPilot ERP for ${shop?.name || 'Shop'}.`,
+      payloadSummary: `Triggered manual ${syncType} with Dukan Yantra ERP for ${shop?.name || 'Shop'}.`,
       status: 'success',
     });
   }

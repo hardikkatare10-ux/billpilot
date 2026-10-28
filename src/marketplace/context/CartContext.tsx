@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Single-Shop Cart Context
+ * NearBasket - Single-Shop Cart Context
  * 
  * Enforces strict single-shop ordering with explicit cross-shop warning modals.
  */

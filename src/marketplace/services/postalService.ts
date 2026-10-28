@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Official Indian Postal Directory Service
+ * NearBasket - Official Indian Postal Directory Service
  * 
  * Provides unified, indexed access to official Indian postal data:
  * - 4-step hierarchical navigation (State -> District/City -> Town/Village -> 6-Digit PIN Code)

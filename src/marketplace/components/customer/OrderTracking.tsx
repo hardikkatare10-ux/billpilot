@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Order Tracking Component
+ * NearBasket - Order Tracking Component
  * 
  * Displays authenticated live order timeline, delivery verification OTP,
  * direct shop contact, and invoice generation.

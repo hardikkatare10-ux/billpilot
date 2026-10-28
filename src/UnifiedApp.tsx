@@ -1,10 +1,10 @@
 /**
- * BillPilot - Unified Master Application
+ * Dukan Yantra and NearBasket - Unified Master Application
  * 
- * Unifies BillPilot (Shopkeeper ERP, POS, Billing, Inventory) and
- * BillPilot Local (Consumer Marketplace, Neighborhood Store Discovery, Orders)
+ * Unifies Dukan Yantra (Shopkeeper ERP, POS, Billing, Inventory) and
+ * NearBasket (Consumer Marketplace, Neighborhood Store Discovery, Orders)
  * into ONE cohesive production web application with shared Firebase backend,
- * role-based authorization, route guards, and blue-and-white BillPilot branding.
+ * role-based authorization and route guards.
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
@@ -228,7 +228,7 @@ const MainAppContent: React.FC = () => {
               <Store className="w-8 h-8" />
             </div>
             <div>
-              <h2 className="text-xl font-bold text-slate-900">BillPilot Merchant Portal</h2>
+              <h2 className="text-xl font-bold text-slate-900">Dukan Yantra Merchant Portal</h2>
               <p className="text-xs text-slate-500 mt-1">
                 Please sign in to access your billing, inventory, and marketplace operations.
               </p>
@@ -301,11 +301,11 @@ const MainAppContent: React.FC = () => {
                   ? 'Merchant Application in Progress'
                   : isRejected
                   ? 'Verification Unsuccessful'
-                  : 'Register as a BillPilot Shopkeeper'}
+                  : 'Register as a Dukan Yantra Shopkeeper'}
               </h2>
               <p className="text-xs text-slate-600 leading-relaxed max-w-md mx-auto">
                 {isPending
-                  ? 'Your store registration has been securely submitted to BillPilot administrators. For consumer trust and safety, merchant privileges require physical business verification (GSTIN/Trade License).'
+                  ? 'Your store registration has been securely submitted to Dukan Yantra administrators. For consumer trust and safety, merchant privileges require physical business verification (GSTIN/Trade License).'
                   : isRejected
                   ? 'Your application could not be verified with the provided documents. Please reach out to administrative support.'
                   : 'To protect inventory records and transaction integrity, shopkeeper privileges are granted exclusively to verified local store owners.'}
@@ -388,7 +388,7 @@ const MainAppContent: React.FC = () => {
           </div>
         </div>
 
-        {/* Master Shopkeeper ERP (BillPilot) */}
+        {/* Dukan Yantra shopkeeper ERP */}
         <div className="flex-1 overflow-hidden">
           <App
             firebaseUser={{
@@ -492,7 +492,7 @@ const MainAppContent: React.FC = () => {
           <div className="flex items-center gap-2">
             <Store className="w-4 h-4" />
             <span>
-              You are browsing BillPilot Local as a customer. Ready to manage billing & store orders?
+              You are browsing NearBasket as a customer. Ready to manage billing & store orders with Dukan Yantra?
             </span>
           </div>
           <button

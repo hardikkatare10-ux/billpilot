@@ -1,5 +1,5 @@
 /**
- * BillPilot - Atomic Order Processing & Inventory Transaction Service
+ * NearBasket - Atomic Order Processing & Inventory Transaction Service
  * 
  * Implements Phase 8:
  * - Server/Transaction-side price validation (prevents client-tampered prices)
@@ -470,7 +470,7 @@ export async function processAtomicOrder(input: PlaceOrderInput): Promise<OrderP
               timestamp: new Date().toISOString(),
               actorId: input.customerId,
               actorRole: 'customer',
-              note: 'Order placed by customer via BillPilot marketplace checkout.',
+              note: 'Order placed by customer via NearBasket marketplace checkout.',
             },
           ],
           delivery: {

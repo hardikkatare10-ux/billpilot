@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Navigation Bar
+ * NearBasket - Navigation Bar
  * 
  * Strict 3-Zone Top Bar Contract with single-element brand wordmark,
  * concise single-line nav links, cart drawer trigger, and clean Sign In / User menu.
@@ -12,6 +12,7 @@ import { useCart } from '../../context/CartContext';
 import { useLocation } from '../../context/LocationContext';
 import { formatINR } from '../../utils/formatters';
 import { dbStore } from '../../services/db/store';
+import nearBasketLogo from '../../assets/nearbasket-logo.png';
 
 interface NavbarProps {
   currentTab: string;
@@ -35,9 +36,10 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
         <div className="flex items-center gap-4 sm:gap-6 shrink-0">
           <button
             onClick={() => onSelectTab('discover')}
-            className="text-lg md:text-xl font-black tracking-tight text-blue-600 whitespace-nowrap shrink-0 cursor-pointer"
+            className="flex items-center gap-2 text-lg md:text-xl font-black tracking-tight text-blue-600 whitespace-nowrap shrink-0 cursor-pointer"
           >
-            BillPilot <span className="text-slate-900 font-semibold">Local</span>
+            <img src={nearBasketLogo} alt="NearBasket logo" className="w-9 h-9 sm:w-10 sm:h-10 object-contain shrink-0" />
+            <span>NearBasket</span>
           </button>
 
           {/* Delivery Location Widget (Swiggy-Style) */}
@@ -118,7 +120,7 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
                   currentTab === 'shop_sync' ? 'text-blue-600 font-bold' : ''
                 }`}
               >
-                BillPilot Sync
+                Dukan Yantra Sync
               </button>
             </>
           )}

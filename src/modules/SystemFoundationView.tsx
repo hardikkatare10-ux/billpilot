@@ -59,13 +59,13 @@ const INITIAL_ROLES: Role[] = [
 ];
 
 const INITIAL_COMPANIES: CompanyRecord[] = [
-  { id: "cp-1", name: "BillPilot HQ", type: "Head Office", region: "India", active: true },
+  { id: "cp-1", name: "Dukan Yantra HQ", type: "Head Office", region: "India", active: true },
   { id: "cp-2", name: "Retail West", type: "Branch", region: "Maharashtra", active: true },
   { id: "cp-3", name: "Distribution Hub", type: "Branch", region: "Gujarat", active: false },
 ];
 
 const INITIAL_BRANCHES: BranchRecord[] = [
-  { id: "br-1", name: "Main Store", company: "BillPilot HQ", inventoryEnabled: true, manager: "Anita Rao" },
+  { id: "br-1", name: "Main Store", company: "Dukan Yantra HQ", inventoryEnabled: true, manager: "Anita Rao" },
   { id: "br-2", name: "Nashik Outlet", company: "Retail West", inventoryEnabled: true, manager: "Rahul Mehta" },
   { id: "br-3", name: "Warehouse", company: "Distribution Hub", inventoryEnabled: false, manager: "Karan Shah" },
 ];
@@ -83,9 +83,9 @@ const INITIAL_AUDIT_LOGS: AuditLog[] = [
 ];
 
 const INITIAL_USERS: UserDirectoryRecord[] = [
-  { id: "u-1", name: "Asha Nair", email: "asha@billpilot.io", role: "Business Owner", company: "BillPilot HQ", branch: "Main Store", status: "Active" },
+  { id: "u-1", name: "Asha Nair", email: "asha@billpilot.io", role: "Business Owner", company: "Dukan Yantra HQ", branch: "Main Store", status: "Active" },
   { id: "u-2", name: "Vikram Shah", email: "vikram@billpilot.io", role: "Admin", company: "Retail West", branch: "Nashik Outlet", status: "Active" },
-  { id: "u-3", name: "Mehul Joshi", email: "mehul@billpilot.io", role: "Manager", company: "BillPilot HQ", branch: "Main Store", status: "Active" },
+  { id: "u-3", name: "Mehul Joshi", email: "mehul@billpilot.io", role: "Manager", company: "Dukan Yantra HQ", branch: "Main Store", status: "Active" },
   { id: "u-4", name: "Priya Kulkarni", email: "priya@billpilot.io", role: "Staff", company: "Distribution Hub", branch: "Warehouse", status: "Pending" },
 ];
 

@@ -76,7 +76,7 @@ export function ModuleLauncherView({ onOpen }: { onOpen: (moduleId: string) => v
       <div className="rounded-2xl border border-border bg-gradient-to-br from-blue-950 via-blue-900 to-slate-950 p-6 text-white shadow-xl">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <p className="text-xs uppercase tracking-[0.28em] text-blue-200/80">BillPilot</p>
+            <p className="text-xs uppercase tracking-[0.28em] text-blue-200/80">Dukan Yantra</p>
             <h2 className="mt-2 text-3xl font-bold tracking-tight">One need, one app.</h2>
           </div>
           <div className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-blue-100">

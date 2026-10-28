@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Core Type Definitions
+ * NearBasket - Core Type Definitions
  * 
  * Production schemas for users, shops, listings, orders, state machine,
  * BillPilot integration contracts, and audit trails.
@@ -324,7 +324,7 @@ export interface CommissionLedgerEntry {
   createdAt: string;
 }
 
-// BillPilot Integration Contract v1.0
+// Dukan Yantra Integration Contract v1.0
 export interface BillPilotConnectionConfig {
   apiUrl: string;
   apiKey: string;

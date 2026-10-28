@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Store, Eye, EyeOff, Cloud, WifiOff } from "lucide-react";
+import { Eye, EyeOff, Cloud, WifiOff } from "lucide-react";
+import dukanYantraLogo from "../icon.png";
 import {
   onAuthStateChanged,
   signInWithEmailAndPassword,
@@ -292,10 +293,10 @@ function FirebaseAuthScreen() {
     <div className="min-h-screen bg-[#0f2557] flex items-center justify-center p-4">
       <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden">
         <div className="bg-gradient-to-br from-[#1e40af] to-[#0f2557] p-8 text-white text-center">
-          <div className="w-16 h-16 rounded-2xl bg-[#f59e0b] flex items-center justify-center mx-auto mb-4 shadow-lg">
-            <Store className="w-8 h-8 text-white" />
+          <div className="w-16 h-16 rounded-2xl bg-white flex items-center justify-center mx-auto mb-4 shadow-lg">
+            <img src={dukanYantraLogo} alt="Dukan Yantra logo" className="w-full h-full rounded-xl object-contain" />
           </div>
-          <h1 className="text-2xl font-bold">Bill Pilot</h1>
+          <h1 className="text-2xl font-bold">Dukan Yantra</h1>
           <p className="text-blue-200 text-sm mt-1">{subtitle}</p>
         </div>
 

@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Area Directory & Coverage Admin Console
+ * NearBasket - Area Directory & Coverage Admin Console
  * 
  * Provides full administrative CRUD, area merging, duplicate prevention,
  * bulk CSV/JSON import with validation preview, and customer locality request reviews.

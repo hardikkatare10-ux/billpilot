@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Checkout Modal
+ * NearBasket - Checkout Modal
  * 
  * Enforces server-side revalidation of stock, prices, address serviceability,
  * and delivery charges before placing atomic orders.

@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Customer Orders List View
+ * NearBasket - Customer Orders List View
  * 
  * Lists customer past and active orders with quick status badges,
  * tracking, invoices, and dispute resolution access.

@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Shop Delivery & Operating Settings
+ * NearBasket - Shop Delivery & Operating Settings
  * 
  * Allows shopkeepers to set delivery radius, charges, minimum order,
  * operating hours, and order acceptance toggles.

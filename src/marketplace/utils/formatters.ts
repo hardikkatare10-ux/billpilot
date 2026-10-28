@@ -1,5 +1,5 @@
 /**
- * BillPilot Local - Utility and Calculation Helpers
+ * NearBasket - Utility and Calculation Helpers
  * 
  * Strict integer minor unit math (no floating point errors for money)
  * and order state machine transition guards.
