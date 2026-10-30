@@ -2,7 +2,7 @@
  * NearBasket - Core Type Definitions
  * 
  * Production schemas for users, shops, listings, orders, state machine,
- * BillPilot integration contracts, and audit trails.
+ * Dukan Yantra integration contracts, and audit trails.
  */
 
 // All monetary amounts are in integer minor units (paise: 1 INR = 100 paise)
@@ -35,8 +35,8 @@ export interface User {
   email: string;
   phone: string;
   role: UserRole;
-  requestedRole?: 'consumer' | 'shopkeeper';
-  shopkeeperStatus?: 'none' | 'pending' | 'approved' | 'rejected';
+  requestedRole?: 'customer' | 'consumer' | 'shopkeeper';
+  shopkeeperStatus?: 'none' | 'pending' | 'approved' | 'rejected' | 'suspended';
   shopId?: string; // If role === 'shopkeeper'
   addresses: UserAddress[];
   createdAt: string;
@@ -241,6 +241,14 @@ export interface InvoiceReference {
   id: string;
   orderId: string;
   invoiceNumber: string; // e.g. "INV-2026-00421"
+  documentType?: 'tax' | 'regular' | 'bill_of_supply';
+  supplierGstin?: string;
+  registrationGstinSnapshot?: string;
+  gstRegistrationStatus?: 'regular' | 'composition' | 'unregistered' | 'pending_verification' | 'suspended';
+  customerId?: string;
+  customerEmail?: string;
+  paymentMethod?: PaymentMethod;
+  paymentStatus?: PaymentStatus;
   billPilotInvoiceId?: string;
   subtotal: MinorUnits;
   deliveryCharge: MinorUnits;
@@ -256,6 +264,7 @@ export interface Order {
   customerId: string;
   customerName: string;
   customerPhone: string;
+  customerEmail?: string;
   shopId: string;
   shopName: string;
   shopAddress: string;
@@ -275,6 +284,8 @@ export interface Order {
   delivery: DeliveryRecord;
   invoice?: InvoiceReference;
   externalBillPilotOrderId?: string;
+  idempotencySignature?: string;
+  invoiceIssue?: string;
   estimatedDeliveryTime: string;
   createdAt: string;
   updatedAt: string;

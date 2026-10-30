@@ -31,6 +31,7 @@ import { OrderTracking } from './marketplace/components/customer/OrderTracking';
 import { CustomerOrders } from './marketplace/components/customer/CustomerOrders';
 import { DisputeModal } from './marketplace/components/customer/DisputeModal';
 import { AdminDashboard } from './marketplace/components/admin/AdminDashboard';
+import { ShopVerificationStatus } from './marketplace/components/common/ShopVerificationStatus';
 
 // Icons
 import {
@@ -97,6 +98,8 @@ const MainAppContent: React.FC = () => {
     setActiveMode,
     logout,
     setShopVerification,
+    setShopGstRegistration,
+    reviewShopVerificationApplication,
   } = useUnifiedAuth();
   const { openAuthModal } = useAuth();
   const { setIsCartDrawerOpen } = useCart();
@@ -305,9 +308,9 @@ const MainAppContent: React.FC = () => {
               </h2>
               <p className="text-xs text-slate-600 leading-relaxed max-w-md mx-auto">
                 {isPending
-                  ? 'Your store registration has been securely submitted to Dukan Yantra administrators. For consumer trust and safety, merchant privileges require physical business verification (GSTIN/Trade License).'
+                  ? 'Your shop remains unavailable in the marketplace until an administrator reviews your submitted photographs and business document. Uploaded evidence supports human review; it does not automatically prove ownership or legal compliance.'
                   : isRejected
-                  ? 'Your application could not be verified with the provided documents. Please reach out to administrative support.'
+                  ? 'Your application was not approved. Review the admin message below or contact support if you believe this decision needs clarification.'
                   : 'To protect inventory records and transaction integrity, shopkeeper privileges are granted exclusively to verified local store owners.'}
               </p>
             </div>
@@ -325,10 +328,18 @@ const MainAppContent: React.FC = () => {
                   </div>
                 )}
                 <div className="flex justify-between items-center text-slate-500">
-                  <span>Estimated Review:</span>
-                  <span className="font-semibold text-amber-700">Within 24 Hours</span>
+                  <span>Review Status:</span>
+                  <span className="font-semibold text-amber-700">Awaiting admin review</span>
                 </div>
               </div>
+            )}
+
+            {currentUser.requestedRole === 'shopkeeper' && currentUser.shopId && (
+              <ShopVerificationStatus
+                shopId={currentUser.shopId}
+                ownerUid={currentUser.id}
+                onContinue={() => openAuthModal('register_shopkeeper')}
+              />
             )}
 
             <div className="pt-2 flex flex-col sm:flex-row gap-3">
@@ -392,10 +403,12 @@ const MainAppContent: React.FC = () => {
         <div className="flex-1 overflow-hidden">
           <App
             firebaseUser={{
+              id: currentUser.id,
               username: currentUser.name,
               shopName: currentUser.shopName || '',
               phone: currentUser.phone,
               email: currentUser.email,
+              shopId: currentUser.shopId,
             }}
             initialTab={initialShopTab}
             onTabChange={(t) => {
@@ -475,6 +488,8 @@ const MainAppContent: React.FC = () => {
             onShopStatusChange={async (shopId, status, notes) => {
               await setShopVerification(shopId, status, notes);
             }}
+            onShopGstRegistrationChange={setShopGstRegistration}
+            onShopApplicationReview={reviewShopVerificationApplication}
           />
         </main>
       </div>

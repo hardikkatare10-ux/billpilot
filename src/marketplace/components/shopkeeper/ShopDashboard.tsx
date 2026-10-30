@@ -91,7 +91,9 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
     (o) => !['delivered', 'cancelled', 'rejected', 'resolved'].includes(o.status)
   );
   const deliveredOrders = orders.filter((o) => o.status === 'delivered');
-  const totalSalesPaise = deliveredOrders.reduce((acc, o) => acc + o.totalAmount, 0);
+  const totalSalesPaise = deliveredOrders
+    .filter((order) => order.paymentStatus === 'completed')
+    .reduce((acc, order) => acc + order.totalAmount, 0);
 
   const handleAcceptOrder = async (orderId: string) => {
     setIsUpdatingOrder(true);
@@ -107,6 +109,25 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Could not accept order.';
       setActionError(msg);
+    } finally {
+      setIsUpdatingOrder(false);
+    }
+  };
+
+  const handleRetryInvoice = async (orderId: string) => {
+    setIsUpdatingOrder(true);
+    setActionError(null);
+    try {
+      await transitionFirestoreOrderStatus(
+        orderId,
+        'accepted',
+        shop.ownerId,
+        'shopkeeper',
+        { note: 'Retrying idempotent marketplace invoice creation.' }
+      );
+      onRefreshOrders();
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : 'Could not retry invoice creation.');
     } finally {
       setIsUpdatingOrder(false);
     }
@@ -258,7 +279,7 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
 
       {/* KPI Cards */}
       {viewMode === 'dashboard' && (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
           <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex items-center gap-3">
             <div className="p-2.5 bg-blue-50 text-blue-600 rounded-lg">
               <Clock className="w-5 h-5" />
@@ -284,11 +305,23 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
           </div>
 
           <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex items-center gap-3">
+            <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-lg">
+              <Package className="w-5 h-5" />
+            </div>
+            <div>
+              <span className="text-xs text-slate-500 block">Marketplace Orders</span>
+              <span className="text-xl font-extrabold text-slate-900 font-tabular">
+                {orders.length}
+              </span>
+            </div>
+          </div>
+
+          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex items-center gap-3">
             <div className="p-2.5 bg-amber-50 text-amber-600 rounded-lg">
               <TrendingUp className="w-5 h-5" />
             </div>
             <div>
-              <span className="text-xs text-slate-500 block">Fulfilled Sales</span>
+              <span className="text-xs text-slate-500 block">Paid Marketplace Sales</span>
               <span className="text-xl font-extrabold text-slate-900 font-tabular">
                 {formatINR(totalSalesPaise)}
               </span>
@@ -369,6 +402,12 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
                       )}
                     </div>
                   </div>
+
+                  {order.invoiceIssue && (
+                    <p role="alert" className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                      Invoice needs review: {order.invoiceIssue}
+                    </p>
+                  )}
 
                   {/* Customer & Address Details */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs bg-slate-50 p-3 rounded-lg border border-slate-100">
@@ -460,13 +499,24 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
                       )}
 
                       {isAccepted && (
-                        <button
-                          onClick={() => handleAdvanceStatus(order.id, 'preparing')}
-                          disabled={isUpdatingOrder}
-                          className="px-3.5 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
-                        >
-                          Mark as Preparing
-                        </button>
+                        <>
+                          {!order.invoice?.documentType && (
+                            <button
+                              onClick={() => handleRetryInvoice(order.id)}
+                              disabled={isUpdatingOrder}
+                              className="px-3.5 py-1.5 text-xs font-semibold text-amber-800 bg-amber-100 hover:bg-amber-200 rounded-lg transition-colors cursor-pointer"
+                            >
+                              Retry Invoice
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleAdvanceStatus(order.id, 'preparing')}
+                            disabled={isUpdatingOrder}
+                            className="px-3.5 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+                          >
+                            Mark as Preparing
+                          </button>
+                        </>
                       )}
 
                       {isPreparing && (

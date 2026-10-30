@@ -17,6 +17,13 @@ interface InvoiceModalProps {
 
 export const InvoiceModal: React.FC<InvoiceModalProps> = ({ order, onClose }) => {
   const invoice = order.invoice;
+  const documentType = invoice?.documentType || 'regular';
+  const isTaxInvoice = documentType === 'tax';
+  const documentLabel = documentType === 'tax'
+    ? 'GST Tax Invoice'
+    : documentType === 'bill_of_supply'
+      ? 'Bill of Supply'
+      : 'Non-GST Bill / Receipt';
 
   const handlePrint = () => {
     window.print();
@@ -28,7 +35,7 @@ export const InvoiceModal: React.FC<InvoiceModalProps> = ({ order, onClose }) =>
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-slate-50 print:hidden">
           <div className="flex items-center gap-2">
-            <span className="font-semibold text-slate-800 text-sm">Tax Invoice & Cash Receipt</span>
+            <span className="font-semibold text-slate-800 text-sm">{documentLabel}</span>
             <span className="text-xs text-slate-500">· {order.orderNumber}</span>
           </div>
           <div className="flex items-center gap-2">
@@ -57,11 +64,13 @@ export const InvoiceModal: React.FC<InvoiceModalProps> = ({ order, onClose }) =>
               <h2 className="text-xl font-bold text-slate-900">{order.shopName}</h2>
               <p className="text-xs text-slate-500 mt-1 max-w-xs">{order.shopAddress}</p>
               <p className="text-xs text-slate-500 mt-0.5">Phone: {order.shopPhone}</p>
-              <p className="text-xs text-slate-500 mt-0.5">GSTIN: 29ABCDE1234F1Z5</p>
+              {isTaxInvoice && invoice?.supplierGstin && (
+                <p className="text-xs text-slate-500 mt-0.5">GSTIN: {invoice.supplierGstin}</p>
+              )}
             </div>
             <div className="text-right">
               <span className="inline-block px-2.5 py-0.5 bg-blue-50 text-blue-700 font-mono text-xs font-semibold rounded">
-                TAX INVOICE
+                {documentLabel.toUpperCase()}
               </span>
               <p className="font-mono text-xs font-semibold text-slate-700 mt-2">
                 {invoice?.invoiceNumber || 'INV-DRAFT'}
@@ -106,7 +115,7 @@ export const InvoiceModal: React.FC<InvoiceModalProps> = ({ order, onClose }) =>
                   <th className="py-2.5 px-3">Item Description</th>
                   <th className="py-2.5 px-3 text-right">Qty</th>
                   <th className="py-2.5 px-3 text-right">Unit Price</th>
-                  <th className="py-2.5 px-3 text-right">GST Rate</th>
+                  {isTaxInvoice && <th className="py-2.5 px-3 text-right">GST Rate</th>}
                   <th className="py-2.5 px-3 text-right">Total</th>
                 </tr>
               </thead>
@@ -120,7 +129,7 @@ export const InvoiceModal: React.FC<InvoiceModalProps> = ({ order, onClose }) =>
                     </td>
                     <td className="py-2.5 px-3 text-right font-mono tabular-nums">{item.quantity}</td>
                     <td className="py-2.5 px-3 text-right font-mono tabular-nums">{formatINR(item.unitPrice)}</td>
-                    <td className="py-2.5 px-3 text-right font-mono tabular-nums">{item.gstRate}%</td>
+                    {isTaxInvoice && <td className="py-2.5 px-3 text-right font-mono tabular-nums">{item.gstRate}%</td>}
                     <td className="py-2.5 px-3 text-right font-medium text-slate-900 font-mono tabular-nums">
                       {formatINR(item.subtotal)}
                     </td>
@@ -143,24 +152,29 @@ export const InvoiceModal: React.FC<InvoiceModalProps> = ({ order, onClose }) =>
                   {order.deliveryCharge === 0 ? 'FREE' : formatINR(order.deliveryCharge)}
                 </span>
               </div>
-              <div className="flex justify-between text-slate-600">
+              {isTaxInvoice && <div className="flex justify-between text-slate-600">
                 <span>GST (Taxes Included):</span>
-                <span className="font-mono tabular-nums">{formatINR(order.gstTotal)}</span>
-              </div>
+                <span className="font-mono tabular-nums">{formatINR(invoice?.gstTotal || 0)}</span>
+              </div>}
+              {documentType === 'bill_of_supply' && (
+                <p className="text-[11px] text-slate-600">
+                  Composition taxable person, not eligible to collect tax on supplies.
+                </p>
+              )}
               <div className="flex justify-between border-t border-slate-200 pt-2 text-sm font-bold text-slate-900">
                 <span>Grand Total:</span>
-                <span className="font-mono tabular-nums">{formatINR(order.totalAmount)}</span>
+                <span className="font-mono tabular-nums">{formatINR(invoice?.grandTotal ?? order.totalAmount)}</span>
               </div>
             </div>
           </div>
 
           {/* Footer Notes */}
           <div className="border-t border-slate-100 pt-4 flex items-center justify-between text-xs text-slate-500">
-            <div className="flex items-center gap-1.5 text-emerald-700">
+            <div className="flex items-center gap-1.5 text-slate-600">
               <CheckCircle className="w-3.5 h-3.5" />
-              <span>Verified Delivery via OTP Handshake</span>
+              <span>Marketplace order reference: {order.orderNumber}</span>
             </div>
-            <span>Powered by NearBasket Marketplace</span>
+            <span>NearBasket Marketplace</span>
           </div>
         </div>
       </div>

@@ -18,6 +18,7 @@ service cloud.firestore {
 
     function isAdmin() {
       return isSignedIn() && (
+        ('admin' in request.auth.token && request.auth.token.admin == true) ||
         request.auth.token.email == "hardikkatare10@gmail.com" ||
         request.auth.token.email == "admin@billpilot.app" ||
         exists(/databases/$(database)/documents/admins/$(request.auth.uid))
@@ -31,6 +32,60 @@ service cloud.firestore {
          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.shopkeeperStatus == 'approved') ||
         isAdmin()
       );
+    }
+
+    function ownsVerifiedShop(shopId) {
+      let shopPath = /databases/$(database)/documents/shops/$(shopId);
+      return isSignedIn()
+        && exists(shopPath)
+        && get(shopPath).data.ownerId == request.auth.uid
+        && get(shopPath).data.verificationStatus == 'verified';
+    }
+
+    function verificationApplicationPath(shopId) {
+      return /databases/$(database)/documents/shops/$(shopId)/private/verificationApplication;
+    }
+
+    function verificationAuditPath(shopId, auditId) {
+      return /databases/$(database)/documents/shops/$(shopId)/verificationAudit/$(auditId);
+    }
+
+    function hasVerificationAuditAfter(shopId, expectedStatus) {
+      let auditId = incoming().verificationAuditId;
+      let auditPath = verificationAuditPath(shopId, auditId);
+      return auditId is string
+        && existsAfter(auditPath)
+        && getAfter(auditPath).data.actorId == request.auth.uid
+        && getAfter(auditPath).data.shopId == shopId
+        && getAfter(auditPath).data.reason is string
+        && getAfter(auditPath).data.reason.size() > 0
+        && getAfter(auditPath).data.shopStatus == expectedStatus;
+    }
+
+    function hasApplicationAuditAfter(shopId, expectedStatus) {
+      let auditId = incoming().verificationAuditId;
+      let auditPath = verificationAuditPath(shopId, auditId);
+      return auditId is string
+        && existsAfter(auditPath)
+        && getAfter(auditPath).data.actorId == request.auth.uid
+        && getAfter(auditPath).data.shopId == shopId
+        && getAfter(auditPath).data.reason is string
+        && getAfter(auditPath).data.reason.size() > 0
+        && getAfter(auditPath).data.newStatus == expectedStatus;
+    }
+
+    function hasCompleteApplicationAfterApproval(shopId) {
+      let applicationPath = verificationApplicationPath(shopId);
+      return existsAfter(applicationPath)
+        && getAfter(applicationPath).data.status == 'approved'
+        && getAfter(applicationPath).data.applicantUid == get(
+          /databases/$(database)/documents/shops/$(shopId)
+        ).data.ownerId
+        && getAfter(applicationPath).data.photos.keys().hasAll([
+          'exterior', 'interior', 'shopkeeper'
+        ])
+        && getAfter(applicationPath).data.businessDocument.path is string
+        && getAfter(applicationPath).data.verificationAuditId is string;
     }
 
     function isShopOwner(shopId) {
@@ -68,7 +123,10 @@ service cloud.firestore {
       // Normal users CANNOT promote themselves or change role/status
       allow update: if isSignedIn() && (
         (request.auth.uid == userId && !incoming().diff(existing()).affectedKeys().hasAny(['role', 'requestedRole', 'shopkeeperStatus', 'shopId', 'id', 'email']))
-        || isAdmin()
+        || (isAdmin() && (
+          !incoming().diff(existing()).affectedKeys().hasAny(['shopkeeperStatus'])
+          || incoming().shopkeeperStatus in ['pending', 'approved', 'rejected', 'suspended']
+        ))
       );
 
       allow delete: if isAdmin();
@@ -90,11 +148,334 @@ service cloud.firestore {
 
       // Shop owners can update shop settings/hours/delivery, but cannot self-verify
       allow update: if isSignedIn() && (
-        (existing().ownerId == request.auth.uid && incoming().ownerId == existing().ownerId && !incoming().diff(existing()).affectedKeys().hasAny(['verificationStatus']))
-        || isAdmin()
+        (existing().ownerId == request.auth.uid
+          && incoming().ownerId == existing().ownerId
+          && !incoming().diff(existing()).affectedKeys().hasAny([
+            'verificationStatus',
+            'gstRegistrationStatus',
+            'gstStatusVerified',
+            'gstin',
+            'verificationAuditId'
+          ]))
+        || (isAdmin() && (
+          (
+            !incoming().diff(existing()).affectedKeys().hasAny(['verificationStatus'])
+            || hasVerificationAuditAfter(shopId, incoming().verificationStatus)
+          )
+          && (
+            incoming().verificationStatus != 'verified'
+            || hasCompleteApplicationAfterApproval(shopId)
+          )
+        ))
       );
 
       allow delete: if isAdmin();
+
+      // GST registration details are private to the shop owner and authorised administrators.
+      match /private/gstRegistration {
+        allow read: if isAdmin() || isShopOwner(shopId);
+        allow create: if isAdmin() || (
+          isSignedIn()
+          && isShopOwner(shopId)
+          && incoming().status == 'pending_verification'
+          && incoming().verified == false
+          && !incoming().keys().hasAny(['verifiedBy', 'verifiedByEmail', 'verifiedAt'])
+        );
+        allow update: if isAdmin() || (
+          isSignedIn()
+          && isShopOwner(shopId)
+          && existing().status == 'pending_verification'
+          && existing().verified == false
+          && incoming().status == existing().status
+          && incoming().verified == false
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'gstin', 'requestedScheme', 'submittedAt', 'updatedAt'
+          ])
+          && incoming().gstin is string
+          && incoming().gstin.matches('^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$')
+          && incoming().requestedScheme in ['regular', 'composition']
+        );
+        allow delete: if isAdmin();
+      }
+
+      match /private/verificationApplication {
+        function validFileReference(file, expectedPath, maxBytes, validContentTypes) {
+          return file is map
+            && file.path == expectedPath
+            && file.name is string
+            && file.contentType in validContentTypes
+            && file.size is number
+            && file.size > 0
+            && file.size <= maxBytes
+            && file.sha256 is string
+            && file.sha256.matches('^[0-9a-f]{64}$');
+        }
+
+        function validApplicationFiles(data) {
+          return data.photos is map
+            && validFileReference(
+              data.photos.exterior,
+              'shop-verification/' + request.auth.uid + '/' + shopId + '/photos/exterior-' + data.photos.exterior.sha256,
+              5 * 1024 * 1024,
+              ['image/jpeg', 'image/png', 'image/webp']
+            )
+            && validFileReference(
+              data.photos.interior,
+              'shop-verification/' + request.auth.uid + '/' + shopId + '/photos/interior-' + data.photos.interior.sha256,
+              5 * 1024 * 1024,
+              ['image/jpeg', 'image/png', 'image/webp']
+            )
+            && data.photos.exterior.sha256 != data.photos.interior.sha256
+            && data.photos.exterior.sha256 != data.photos.shopkeeper.sha256
+            && data.photos.interior.sha256 != data.photos.shopkeeper.sha256
+            && validFileReference(
+              data.photos.shopkeeper,
+              'shop-verification/' + request.auth.uid + '/' + shopId + '/photos/shopkeeper-' + data.photos.shopkeeper.sha256,
+              5 * 1024 * 1024,
+              ['image/jpeg', 'image/png', 'image/webp']
+            )
+            && validFileReference(
+              data.businessDocument,
+              'shop-verification/' + request.auth.uid + '/' + shopId + '/documents/business-' + data.businessDocument.sha256,
+              10 * 1024 * 1024,
+              ['application/pdf', 'image/jpeg', 'image/png', 'image/webp']
+            )
+            && data.businessDocument.type in ['gumasta', 'udyam', 'gst_certificate', 'other']
+            && (!data.keys().hasAny(['additionalDocuments']) || (
+              data.additionalDocuments is list
+              && data.additionalDocuments.size() <= 3
+              && (
+                data.additionalDocuments.size() < 1
+                || (
+                  validFileReference(
+                    data.additionalDocuments[0],
+                    'shop-verification/' + request.auth.uid + '/' + shopId + '/documents/additional-1-' + data.additionalDocuments[0].sha256,
+                    10 * 1024 * 1024,
+                    ['application/pdf', 'image/jpeg', 'image/png', 'image/webp']
+                  )
+                  && data.additionalDocuments[0].type in ['gumasta', 'udyam', 'gst_certificate', 'other']
+                )
+              )
+              && (
+                data.additionalDocuments.size() < 2
+                || (
+                  validFileReference(
+                    data.additionalDocuments[1],
+                    'shop-verification/' + request.auth.uid + '/' + shopId + '/documents/additional-2-' + data.additionalDocuments[1].sha256,
+                    10 * 1024 * 1024,
+                    ['application/pdf', 'image/jpeg', 'image/png', 'image/webp']
+                  )
+                  && data.additionalDocuments[1].type in ['gumasta', 'udyam', 'gst_certificate', 'other']
+                )
+              )
+              && (
+                data.additionalDocuments.size() < 3
+                || (
+                  validFileReference(
+                    data.additionalDocuments[2],
+                    'shop-verification/' + request.auth.uid + '/' + shopId + '/documents/additional-3-' + data.additionalDocuments[2].sha256,
+                    10 * 1024 * 1024,
+                    ['application/pdf', 'image/jpeg', 'image/png', 'image/webp']
+                  )
+                  && data.additionalDocuments[2].type in ['gumasta', 'udyam', 'gst_certificate', 'other']
+                )
+              )
+            ));
+        }
+
+        function allowedAdminTransition() {
+          return (
+            existing().status in ['pending_verification', 'additional_information_required']
+            && incoming().status in [
+              'approved', 'rejected', 'additional_information_required'
+            ]
+          ) || (
+            existing().status == 'approved'
+            && incoming().status == 'suspended'
+          ) || (
+            existing().status == 'suspended'
+            && incoming().status == 'approved'
+          );
+        }
+
+        allow read: if isAdmin() || isShopOwner(shopId);
+        allow create: if isSignedIn()
+          && isShopOwner(shopId)
+          && incoming().keys().hasOnly([
+            'applicantUid', 'shopId', 'shopName', 'applicantName', 'applicantEmail',
+            'applicantPhone', 'address', 'photos', 'businessDocument', 'status',
+            'submittedAt', 'requestMessage', 'additionalDocuments'
+          ])
+          && incoming().applicantUid == request.auth.uid
+          && incoming().shopId == shopId
+          && incoming().status == 'pending_verification'
+          && incoming().submittedAt is string
+          && validApplicationFiles(incoming());
+        allow update: if (isAdmin()
+          && allowedAdminTransition()
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'status', 'reviewedAt', 'reviewedBy', 'reviewMessage', 'verificationAuditId'
+          ])
+          && incoming().reviewedBy == request.auth.uid
+          && incoming().reviewedAt is string
+          && incoming().reviewMessage is string
+          && incoming().reviewMessage.size() > 0
+          && hasApplicationAuditAfter(shopId, incoming().status)
+        ) || (
+          isSignedIn()
+          && isShopOwner(shopId)
+          && existing().applicantUid == request.auth.uid
+          && existing().status == 'additional_information_required'
+          && incoming().status == 'pending_verification'
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'photos', 'businessDocument', 'submittedAt', 'status', 'additionalDocuments'
+          ])
+          && validApplicationFiles(incoming())
+        );
+        allow delete: if isAdmin();
+      }
+
+      match /verificationAudit/{auditId} {
+        allow read: if isAdmin() || isShopOwner(shopId);
+        allow create: if isAdmin()
+          && incoming().actorId == request.auth.uid
+          && incoming().shopId == shopId
+          && incoming().action is string
+          && incoming().timestamp is string
+          && incoming().reason is string
+          && incoming().reason.size() > 0;
+        allow update, delete: if false;
+      }
+
+      // GST verification audit records are immutable and administrator-authored.
+      match /gstStatusAudit/{auditId} {
+        allow read: if isAdmin() || isShopOwner(shopId);
+        allow create: if isAdmin()
+          && incoming().actorId == request.auth.uid
+          && incoming().timestamp is string
+          && incoming().reason is string
+          && incoming().reason.size() > 0;
+        allow update, delete: if false;
+      }
+
+      match /marketplaceInvoices/{invoiceId} {
+        function acceptedOrderAfterWrite() {
+          let orderPath = /databases/$(database)/documents/orders/$(invoiceId);
+          return existsAfter(orderPath)
+            && getAfter(orderPath).data.shopId == shopId
+            && getAfter(orderPath).data.status == 'accepted'
+            && getAfter(orderPath).data.invoice.orderId == invoiceId;
+        }
+
+        allow get, list: if isAdmin() || isShopOwner(shopId);
+        allow create: if isShopOwner(shopId)
+          && incoming().id == invoiceId
+          && incoming().orderId == invoiceId
+          && incoming().invoiceNumber == 'MP-' + invoiceId
+          && incoming().shopId == shopId
+          && acceptedOrderAfterWrite()
+          && incoming().customerId == getAfter(
+            /databases/$(database)/documents/orders/$(invoiceId)
+          ).data.customerId
+          && incoming().grandTotal == getAfter(
+            /databases/$(database)/documents/orders/$(invoiceId)
+          ).data.totalAmount
+          && incoming().subtotal == getAfter(
+            /databases/$(database)/documents/orders/$(invoiceId)
+          ).data.subtotal
+          && incoming().deliveryCharge == getAfter(
+            /databases/$(database)/documents/orders/$(invoiceId)
+          ).data.deliveryCharge
+          && incoming().items == getAfter(
+            /databases/$(database)/documents/orders/$(invoiceId)
+          ).data.items
+          && (
+            (
+              incoming().documentType == 'tax'
+              && get(/databases/$(database)/documents/shops/$(shopId)/private/gstRegistration).data.status == 'regular'
+              && get(/databases/$(database)/documents/shops/$(shopId)/private/gstRegistration).data.verified == true
+              && incoming().supplierGstin == get(/databases/$(database)/documents/shops/$(shopId)/private/gstRegistration).data.gstin
+              && incoming().gstTotal == getAfter(
+                /databases/$(database)/documents/orders/$(invoiceId)
+              ).data.gstTotal
+            )
+            || (
+              incoming().documentType == 'bill_of_supply'
+              && get(/databases/$(database)/documents/shops/$(shopId)/private/gstRegistration).data.status == 'composition'
+              && get(/databases/$(database)/documents/shops/$(shopId)/private/gstRegistration).data.verified == true
+              && incoming().gstTotal == 0
+              && !incoming().keys().hasAny(['supplierGstin'])
+            )
+            || (
+              incoming().documentType == 'regular'
+              && incoming().gstTotal == 0
+              && !incoming().keys().hasAny(['supplierGstin'])
+              && (
+                !exists(/databases/$(database)/documents/shops/$(shopId)/private/gstRegistration)
+                || get(/databases/$(database)/documents/shops/$(shopId)/private/gstRegistration).data.status != 'composition'
+                || get(/databases/$(database)/documents/shops/$(shopId)/private/gstRegistration).data.verified != true
+              )
+              && (
+                !incoming().keys().hasAny(['registrationGstinSnapshot'])
+                || (
+                  get(/databases/$(database)/documents/shops/$(shopId)/private/gstRegistration).data.status == 'regular'
+                  && get(/databases/$(database)/documents/shops/$(shopId)/private/gstRegistration).data.verified == true
+                  && incoming().registrationGstinSnapshot == get(/databases/$(database)/documents/shops/$(shopId)/private/gstRegistration).data.gstin
+                )
+              )
+            )
+          );
+        allow update, delete: if false;
+      }
+
+      match /marketplaceCustomers/{customerId} {
+        function linkedOrderAfterWrite() {
+          let orderPath = /databases/$(database)/documents/orders/$(incoming().lastOrderId);
+          return existsAfter(orderPath)
+            && getAfter(orderPath).data.shopId == shopId
+            && getAfter(orderPath).data.customerId == customerId;
+        }
+
+        allow get: if isAdmin() || isShopOwner(shopId) ||
+          (isSignedIn() && request.auth.uid == customerId);
+        allow list: if isAdmin() || isShopOwner(shopId);
+        allow create: if isSignedIn()
+          && request.auth.uid == customerId
+          && incoming().keys().hasOnly([
+            'customerId', 'name', 'phone', 'email', 'firstOrderAt',
+            'lastOrderAt', 'lastOrderId', 'createdAt'
+          ])
+          && incoming().customerId == customerId
+          && linkedOrderAfterWrite()
+          && (!incoming().keys().hasAny(['name']) || incoming().name == getAfter(
+            /databases/$(database)/documents/orders/$(incoming().lastOrderId)
+          ).data.customerName)
+          && (!incoming().keys().hasAny(['phone']) || incoming().phone == getAfter(
+            /databases/$(database)/documents/orders/$(incoming().lastOrderId)
+          ).data.customerPhone)
+          && (!incoming().keys().hasAny(['email']) || incoming().email == getAfter(
+            /databases/$(database)/documents/orders/$(incoming().lastOrderId)
+          ).data.customerEmail);
+        allow update: if isSignedIn()
+          && request.auth.uid == customerId
+          && incoming().keys().hasOnly([
+            'customerId', 'name', 'phone', 'email', 'firstOrderAt',
+            'lastOrderAt', 'lastOrderId', 'createdAt'
+          ])
+          && existing().customerId == customerId
+          && incoming().customerId == customerId
+          && linkedOrderAfterWrite()
+          && (!incoming().keys().hasAny(['name']) || incoming().name == getAfter(
+            /databases/$(database)/documents/orders/$(incoming().lastOrderId)
+          ).data.customerName)
+          && (!incoming().keys().hasAny(['phone']) || incoming().phone == getAfter(
+            /databases/$(database)/documents/orders/$(incoming().lastOrderId)
+          ).data.customerPhone)
+          && (!incoming().keys().hasAny(['email']) || incoming().email == getAfter(
+            /databases/$(database)/documents/orders/$(incoming().lastOrderId)
+          ).data.customerEmail);
+        allow delete: if false;
+      }
     }
 
     // 4. Products & Inventory (Single Canonical Inventory)
@@ -107,13 +488,15 @@ service cloud.firestore {
         && incoming().ownerId == request.auth.uid
         && incoming().shopPrice is number && incoming().shopPrice >= 0
         && incoming().stockQuantity is number && incoming().stockQuantity >= 0
-        && (isApprovedShopkeeper() || isAdmin());
+        && ((isApprovedShopkeeper() && ownsVerifiedShop(incoming().shopId)) || isAdmin());
 
       // Product updates:
       // A) Owning shopkeeper updates product info, prices, stock
       // B) Atomic checkout orders decrement stockQuantity (stock must decrease and stay >= 0)
       allow update: if isSignedIn() && (
-        (existing().ownerId == request.auth.uid && incoming().ownerId == existing().ownerId)
+        (existing().ownerId == request.auth.uid
+          && incoming().ownerId == existing().ownerId
+          && ownsVerifiedShop(existing().shopId))
         || (incoming().diff(existing()).affectedKeys().hasOnly(['stockQuantity', 'isAvailable', 'updatedAt'])
             && incoming().stockQuantity is number
             && incoming().stockQuantity >= 0
@@ -126,6 +509,15 @@ service cloud.firestore {
 
     // 5. Orders Collection
     match /orders/{orderId} {
+      function invoiceReferenceIsBackedByShopInvoice() {
+        let invoicePath = /databases/$(database)/documents/shops/$(existing().shopId)/marketplaceInvoices/$(orderId);
+        return existsAfter(invoicePath)
+          && getAfter(invoicePath).data.orderId == incoming().invoice.orderId
+          && getAfter(invoicePath).data.documentType == incoming().invoice.documentType
+          && getAfter(invoicePath).data.invoiceNumber == incoming().invoice.invoiceNumber
+          && getAfter(invoicePath).data.grandTotal == incoming().invoice.grandTotal;
+      }
+
       // Customers read their own orders; Shopkeepers read orders placed with their shop
       allow get: if isSignedIn() && (
         resource.data.customerId == request.auth.uid
@@ -142,6 +534,9 @@ service cloud.firestore {
       // Authenticated customers can place orders with validated non-negative total
       allow create: if isSignedIn()
         && incoming().customerId == request.auth.uid
+        && exists(/databases/$(database)/documents/shops/$(incoming().shopId))
+        && get(/databases/$(database)/documents/shops/$(incoming().shopId)).data.verificationStatus == 'verified'
+        && get(/databases/$(database)/documents/shops/$(incoming().shopId)).data.deliverySettings.isAcceptingOrders == true
         && incoming().totalAmount is number && incoming().totalAmount > 0;
 
       // Order status updates:
@@ -149,7 +544,17 @@ service cloud.firestore {
       // Shopkeeper: order status lifecycle (accepted, preparing, out_for_delivery, delivered)
       allow update: if isSignedIn() && (
         (existing().customerId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'statusHistory', 'updatedAt', 'cancellationReason']))
-        || isShopOwner(existing().shopId)
+        || (
+          (isShopOwner(existing().shopId)
+            && ownsVerifiedShop(existing().shopId))
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'status', 'statusHistory', 'updatedAt', 'invoice', 'invoiceIssue', 'delivery', 'paymentStatus'
+          ])
+          && (
+            !incoming().diff(existing()).affectedKeys().hasAny(['invoice'])
+            || invoiceReferenceIsBackedByShopInvoice()
+          )
+        )
         || isAdmin()
       );
 

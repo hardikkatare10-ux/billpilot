@@ -41,6 +41,8 @@ import {
   type RegistrationRole,
   type ShopkeeperStatus,
 } from './authRoles';
+import { isValidGstin, type GstRegistrationStatus } from '../app/invoiceRules';
+import type { ShopApplicationStatus } from '../marketplace/services/firebase/shopVerification';
 
 export type { AccountRole, ShopkeeperStatus } from './authRoles';
 
@@ -95,6 +97,17 @@ export interface UnifiedAuthContextType {
   logout: () => Promise<void>;
   approveShopkeeper: (userId: string, shopId?: string) => Promise<void>;
   setShopVerification: (shopId: string, status: Shop['verificationStatus'], notes?: string) => Promise<void>;
+  reviewShopVerificationApplication: (
+    shopId: string,
+    status: ShopApplicationStatus,
+    reason: string
+  ) => Promise<void>;
+  setShopGstRegistration: (
+    shopId: string,
+    status: GstRegistrationStatus,
+    gstin: string,
+    reason: string
+  ) => Promise<void>;
   rejectShopkeeper: (userId: string, reason?: string) => Promise<void>;
   addAddress: (address: Omit<UserAddress, 'id' | 'userId'>) => UserAddress;
   refreshUserData: () => Promise<void>;
@@ -140,7 +153,8 @@ export const UnifiedAuthProvider: React.FC<{ children: React.ReactNode }> = ({ c
     const shopkeeperStatus: ShopkeeperStatus =
       userData.shopkeeperStatus === 'pending' ||
       userData.shopkeeperStatus === 'approved' ||
-      userData.shopkeeperStatus === 'rejected'
+      userData.shopkeeperStatus === 'rejected' ||
+      userData.shopkeeperStatus === 'suspended'
         ? userData.shopkeeperStatus
         : 'none';
     const userRole: AccountRole = emailIsAdmin ? 'admin' : requestedRole;
@@ -310,7 +324,6 @@ export const UnifiedAuthProvider: React.FC<{ children: React.ReactNode }> = ({ c
           reviewCount: 1,
           verificationStatus: 'pending',
           verificationDetails: {
-            gstin: input.shopDetails.gstin,
             tradeLicenseNo: input.shopDetails.tradeLicenseNo,
             notes: 'Applied during Dukan Yantra merchant onboarding. Pending admin review.',
           },
@@ -335,7 +348,7 @@ export const UnifiedAuthProvider: React.FC<{ children: React.ReactNode }> = ({ c
             estimatedPrepMinutes: 20,
             estimatedDeliveryMinutes: 25,
             maxConcurrentOrders: 10,
-            isAcceptingOrders: true,
+            isAcceptingOrders: false,
             serviceableLocalities: [input.shopDetails.locality.trim()],
             serviceablePincodes: sanitizedPincodes,
           },
@@ -345,6 +358,15 @@ export const UnifiedAuthProvider: React.FC<{ children: React.ReactNode }> = ({ c
         // Save shop in Firestore
         try {
           await setDoc(doc(db, 'shops', shopId), newShop);
+          await setDoc(doc(db, 'shops', shopId, 'private', 'gstRegistration'), {
+            status: 'pending_verification',
+            verified: false,
+            ...(input.shopDetails.gstin?.trim()
+              ? { gstin: input.shopDetails.gstin.trim().toUpperCase() }
+              : {}),
+            submittedAt: nowIso,
+            updatedAt: nowIso,
+          });
         } catch (e) {
           console.error('Firestore shop create failed:', e);
           cloudWriteError = e;
@@ -446,6 +468,7 @@ export const UnifiedAuthProvider: React.FC<{ children: React.ReactNode }> = ({ c
       throw new Error('Unauthorized: Administrator privileges required.');
     }
     const nowIso = new Date().toISOString();
+    const auditId = `${Date.now()}_${currentUser?.id || 'admin'}`;
     const shop = dbStore.getShopById(shopId);
     if (!shop) {
       throw new Error('Shop application could not be found. Refresh the admin page and try again.');
@@ -456,11 +479,31 @@ export const UnifiedAuthProvider: React.FC<{ children: React.ReactNode }> = ({ c
       verificationStatus: status,
       'verificationDetails.verifiedAt': nowIso,
       'verificationDetails.verifiedBy': currentUser?.email || 'admin',
+      'deliverySettings.isAcceptingOrders': status === 'verified',
+      verificationAuditId: auditId,
       updatedAt: nowIso,
     };
     if (notes) shopUpdate['verificationDetails.notes'] = notes;
     const batch = writeBatch(db);
     batch.update(doc(db, 'shops', shopId), shopUpdate);
+    const auditRef = doc(
+      db,
+      'shops',
+      shopId,
+      'verificationAudit',
+      auditId
+    );
+    batch.set(auditRef, {
+      actorId: currentUser?.id || '',
+      actorEmail: currentUser?.email || '',
+      shopId,
+      action: status,
+      shopStatus: status,
+      timestamp: nowIso,
+      reason: notes?.trim() || `Shop status changed to ${status}.`,
+      previousStatus: shop.verificationStatus,
+      newStatus: status,
+    });
 
     if (ownerId) {
       if (status === 'verified') {
@@ -474,6 +517,11 @@ export const UnifiedAuthProvider: React.FC<{ children: React.ReactNode }> = ({ c
           shopkeeperStatus: 'rejected',
           updatedAt: nowIso,
         });
+      } else if (status === 'suspended') {
+        batch.update(doc(db, 'users', ownerId), {
+          shopkeeperStatus: 'suspended',
+          updatedAt: nowIso,
+        });
       }
     }
     await batch.commit();
@@ -483,6 +531,164 @@ export const UnifiedAuthProvider: React.FC<{ children: React.ReactNode }> = ({ c
     } catch {
       /* shop not in local store yet; Firestore listener will bring it in */
     }
+  };
+
+  const reviewShopVerificationApplication = async (
+    shopId: string,
+    status: ShopApplicationStatus,
+    reason: string
+  ) => {
+    if (!isAdmin) throw new Error('Unauthorized: Administrator privileges required.');
+    const validStatuses: ShopApplicationStatus[] = [
+      'pending_verification',
+      'additional_information_required',
+      'approved',
+      'rejected',
+      'suspended',
+    ];
+    if (!validStatuses.includes(status)) throw new Error('Select a valid application status.');
+    if ((status === 'rejected' || status === 'additional_information_required' || status === 'suspended') &&
+        !reason.trim()) {
+      throw new Error('A reason or information request message is required for this action.');
+    }
+    const reviewReason = reason.trim() ||
+      (status === 'approved' ? 'Approved after review of the submitted materials.' : '');
+
+    const applicationRef = doc(db, 'shops', shopId, 'private', 'verificationApplication');
+    const shopRef = doc(db, 'shops', shopId);
+    const [applicationSnapshot, shopSnapshot] = await Promise.all([
+      getDoc(applicationRef),
+      getDoc(shopRef),
+    ]);
+    if (!applicationSnapshot.exists() || !shopSnapshot.exists()) {
+      throw new Error('The shop verification application could not be found.');
+    }
+    const application = applicationSnapshot.data();
+    const previousStatus = application.status as ShopApplicationStatus;
+    const reviewableStatuses: ShopApplicationStatus[] =
+      status === 'suspended' || (previousStatus === 'suspended' && status === 'approved')
+        ? ['approved', 'suspended']
+        : ['pending_verification', 'additional_information_required'];
+    if (!reviewableStatuses.includes(previousStatus)) {
+      throw new Error(`This application cannot move from ${previousStatus} to ${status}.`);
+    }
+
+    const shop = shopSnapshot.data() as Shop;
+    const ownerId = shop.ownerId;
+    const now = new Date().toISOString();
+    const publicStatus: Shop['verificationStatus'] =
+      status === 'approved' ? 'verified' :
+      status === 'rejected' ? 'rejected' :
+      status === 'suspended' ? 'suspended' : 'pending';
+    const ownerStatus =
+      status === 'approved' ? 'approved' :
+      status === 'rejected' ? 'rejected' :
+      status === 'suspended' ? 'suspended' : 'pending';
+    const auditId = `${Date.now()}_${currentUser?.id || 'admin'}`;
+    const auditRef = doc(
+      db,
+      'shops',
+      shopId,
+      'verificationAudit',
+      auditId
+    );
+    const batch = writeBatch(db);
+    batch.update(applicationRef, {
+      status,
+      reviewedAt: now,
+      reviewedBy: currentUser?.id || '',
+      reviewMessage: reviewReason,
+      verificationAuditId: auditId,
+    });
+    batch.set(auditRef, {
+      actorId: currentUser?.id || '',
+      actorEmail: currentUser?.email || '',
+      shopId,
+      action: status,
+      shopStatus: publicStatus,
+      timestamp: now,
+      reason: reviewReason,
+      previousStatus,
+      newStatus: status,
+    });
+    batch.update(shopRef, {
+      verificationStatus: publicStatus,
+      'deliverySettings.isAcceptingOrders': status === 'approved',
+      verificationAuditId: auditId,
+      'verificationDetails.verifiedAt': status === 'approved' ? now : null,
+      'verificationDetails.verifiedBy': status === 'approved' ? currentUser?.email || '' : null,
+      updatedAt: now,
+    });
+    if (ownerId) {
+      batch.update(doc(db, 'users', ownerId), {
+        role: 'shopkeeper',
+        shopkeeperStatus: ownerStatus,
+        updatedAt: now,
+      });
+    }
+    await batch.commit();
+    try {
+      dbStore.updateShopVerification(shopId, publicStatus, currentUser?.id || 'admin');
+    } catch (error) {
+      console.warn('Local shop cache will refresh after verification review:', error);
+    }
+    if (ownerId && currentUser?.id === ownerId) await refreshUserData();
+  };
+
+  const setShopGstRegistration = async (
+    shopId: string,
+    status: GstRegistrationStatus,
+    gstin: string,
+    reason: string
+  ) => {
+    if (!isAdmin) {
+      throw new Error('Unauthorized: Administrator privileges required to verify shop GST registration.');
+    }
+    const allowedStatuses: GstRegistrationStatus[] = [
+      'unregistered',
+      'regular',
+      'composition',
+      'pending_verification',
+      'suspended',
+    ];
+    if (!allowedStatuses.includes(status)) throw new Error('Select a valid GST registration status.');
+    if (!reason.trim()) throw new Error('Provide the reason for this GST registration status change.');
+    const normalizedGstin = gstin.trim().toUpperCase();
+    if ((status === 'regular' || status === 'composition') && !isValidGstin(normalizedGstin)) {
+      throw new Error('Regular and composition registrations require a valid GSTIN format.');
+    }
+
+    const registrationRef = doc(db, 'shops', shopId, 'private', 'gstRegistration');
+    const previous = await getDoc(registrationRef);
+    const now = new Date().toISOString();
+    const previousData = previous.exists() ? previous.data() : {};
+    const auditRef = doc(
+      db,
+      'shops',
+      shopId,
+      'gstStatusAudit',
+      `${Date.now()}_${currentUser?.id || 'admin'}`
+    );
+    const batch = writeBatch(db);
+    batch.set(registrationRef, {
+      status,
+      verified: status !== 'pending_verification',
+      ...(normalizedGstin ? { gstin: normalizedGstin } : {}),
+      verifiedAt: now,
+      verifiedBy: currentUser?.id || '',
+      verifiedByEmail: currentUser?.email || '',
+      reason: reason.trim(),
+      updatedAt: now,
+    }, { merge: true });
+    batch.set(auditRef, {
+      actorId: currentUser?.id || '',
+      actorEmail: currentUser?.email || '',
+      timestamp: now,
+      reason: reason.trim(),
+      previousStatus: previousData.status || 'pending_verification',
+      newStatus: status,
+    });
+    await batch.commit();
   };
 
   const rejectShopkeeper = async (userId: string, reason?: string) => {
@@ -543,6 +749,8 @@ export const UnifiedAuthProvider: React.FC<{ children: React.ReactNode }> = ({ c
         logout,
         approveShopkeeper,
         setShopVerification,
+        reviewShopVerificationApplication,
+        setShopGstRegistration,
         rejectShopkeeper,
         addAddress,
         refreshUserData,

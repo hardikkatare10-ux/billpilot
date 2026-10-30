@@ -39,8 +39,9 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ onClose, onOrderPl
   const [selectedAddressId, setSelectedAddressId] = useState<string>(
     currentUser?.addresses[0]?.id || ''
   );
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash_on_delivery');
+  const paymentMethod: PaymentMethod = 'cash_on_delivery';
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [idempotencyKey, setIdempotencyKey] = useState<string>(() => crypto.randomUUID());
   const [revalidationResult, setRevalidationResult] = useState<ReturnType<
     typeof dbStore.revalidateCheckout
   > | null>(null);
@@ -58,6 +59,15 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ onClose, onOrderPl
 
   const selectedAddress =
     currentUser?.addresses.find((a) => a.id === selectedAddressId) || currentUser?.addresses[0];
+
+  useEffect(() => {
+    if (!currentUser || !shopId) return;
+    const storageKey = `billpilot:marketplace-order:${currentUser.id}:${shopId}`;
+    const existingKey = sessionStorage.getItem(storageKey);
+    const key = existingKey || crypto.randomUUID();
+    if (!existingKey) sessionStorage.setItem(storageKey, key);
+    setIdempotencyKey(key);
+  }, [currentUser?.id, shopId]);
 
   // Perform server revalidation whenever address or items change
   useEffect(() => {
@@ -113,7 +123,8 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ onClose, onOrderPl
     try {
       const result = await processAtomicOrder({
         customerId: currentUser.id,
-        customerName: currentUser.name || 'Valued Customer',
+        idempotencyKey,
+        customerName: currentUser.name || '',
         customerPhone: currentUser.phone || selectedAddress.phoneNumber || '',
         shopId,
         items: items.map((i) => ({
@@ -125,6 +136,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ onClose, onOrderPl
         paymentMethod,
       });
 
+      sessionStorage.removeItem(`billpilot:marketplace-order:${currentUser.id}:${shopId}`);
       clearCart();
       onOrderPlaced(result.order.id);
     } catch (err: unknown) {
@@ -347,7 +359,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ onClose, onOrderPl
                     type="radio"
                     name="payment_method"
                     checked={paymentMethod === 'cash_on_delivery'}
-                    onChange={() => setPaymentMethod('cash_on_delivery')}
+                    readOnly
                     className="text-blue-600 focus:ring-blue-500 cursor-pointer"
                   />
                 </div>

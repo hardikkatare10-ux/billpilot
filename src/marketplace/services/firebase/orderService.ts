@@ -12,27 +12,33 @@
 import {
   collection,
   doc,
+  getDocs,
   getDoc,
+  limit,
   onSnapshot,
+  orderBy,
   query,
   runTransaction,
-  updateDoc,
+  startAfter,
   where,
+  type DocumentData,
+  type QueryDocumentSnapshot,
   type Unsubscribe,
 } from 'firebase/firestore';
-import { db, isFirebaseConfigured } from '../../../lib/firebase';
+import { auth, db, isFirebaseConfigured } from '../../../lib/firebase';
 import { dbStore } from '../db/store';
+import { buildMarketplaceInvoice, getMarketplaceInvoiceBlockReason } from './marketplaceInvoice';
 import { MinorUnits, Order, OrderItemSnapshot, PaymentMethod, UserAddress, UserRole, OrderStatus } from '../../types';
 import {
   canTransitionOrder,
   generateDeliveryOTP,
-  generateInvoiceNumber,
   generateOrderNumber,
 } from '../../utils/formatters';
 import { calculateHaversineDistanceKm } from '../../utils/geo';
 
 export interface PlaceOrderInput {
   customerId: string;
+  idempotencyKey?: string;
   customerName: string;
   customerPhone: string;
   shopId: string;
@@ -46,6 +52,36 @@ export interface OrderPlacementResult {
   success: boolean;
   order: Order;
   transactionId?: string;
+}
+
+export type CustomerShopOrderCursor = QueryDocumentSnapshot<DocumentData>;
+
+export async function getCustomerShopOrderPage(
+  shopId: string,
+  customerId: string,
+  cursor?: CustomerShopOrderCursor | null,
+  pageSize = 25
+): Promise<{ orders: Order[]; nextCursor: CustomerShopOrderCursor | null }> {
+  if (!isFirebaseConfigured || !shopId || !customerId) {
+    throw new Error('Order history requires a shop and customer account.');
+  }
+  const constraints = [
+    where('shopId', '==', shopId),
+    where('customerId', '==', customerId),
+    orderBy('createdAt', 'desc'),
+    ...(cursor ? [startAfter(cursor)] : []),
+    limit(pageSize),
+  ];
+  const snapshot = await getDocs(query(collection(db, 'orders'), ...constraints));
+  const orders = snapshot.docs.map((item) =>
+    orderFromFirestore(item.id, item.data() as Record<string, unknown>)
+  );
+  return {
+    orders,
+    nextCursor: snapshot.docs.length === pageSize
+      ? snapshot.docs[snapshot.docs.length - 1]
+      : null,
+  };
 }
 
 function orderFromFirestore(id: string, data: Record<string, unknown>): Order {
@@ -102,6 +138,7 @@ function orderFromFirestore(id: string, data: Record<string, unknown>): Order {
     customerId: String(data.customerId ?? ''),
     customerName: String(data.customerName ?? 'Customer'),
     customerPhone: String(data.customerPhone ?? ''),
+    customerEmail: String(data.customerEmail ?? ''),
     shopId,
     shopName,
     shopAddress,
@@ -132,6 +169,8 @@ function orderFromFirestore(id: string, data: Record<string, unknown>): Order {
     },
     invoice: data.invoice as Order['invoice'],
     externalBillPilotOrderId: data.externalBillPilotOrderId as string | undefined,
+    idempotencySignature: typeof data.idempotencySignature === 'string' ? data.idempotencySignature : undefined,
+    invoiceIssue: typeof data.invoiceIssue === 'string' ? data.invoiceIssue : undefined,
     estimatedDeliveryTime: String(data.estimatedDeliveryTime ?? ''),
     createdAt,
     updatedAt: String(data.updatedAt ?? createdAt),
@@ -196,128 +235,122 @@ export async function transitionFirestoreOrderStatus(
     throw new Error('Order status updates require marketplace cloud sync.');
   }
 
+  if (auth.currentUser?.uid !== actorId) {
+    throw new Error('The signed-in account does not match the requested order action.');
+  }
+
   const orderRef = doc(db, 'orders', orderId);
-  const orderSnapshot = await getDoc(orderRef);
-  if (!orderSnapshot.exists()) throw new Error('Order not found in marketplace cloud storage.');
+  let result: Order | null = null;
+  await runTransaction(db, async (transaction) => {
+    const orderSnapshot = await transaction.get(orderRef);
+    if (!orderSnapshot.exists()) throw new Error('Order not found in marketplace cloud storage.');
+    const order = orderFromFirestore(orderSnapshot.id, orderSnapshot.data() as Record<string, unknown>);
+    const invoiceRef = doc(db, 'shops', order.shopId, 'marketplaceInvoices', order.id);
+    const registrationRef = doc(db, 'shops', order.shopId, 'private', 'gstRegistration');
+    const shouldIssueInvoice = targetStatus === 'accepted';
+    const invoiceSnapshot = shouldIssueInvoice ? await transaction.get(invoiceRef) : null;
+    const registrationSnapshot = shouldIssueInvoice ? await transaction.get(registrationRef) : null;
 
-  const order = orderFromFirestore(
-    orderSnapshot.id,
-    orderSnapshot.data() as Record<string, unknown>
-  );
-  const transition = canTransitionOrder(order.status, targetStatus, actorRole);
-  if (!transition.allowed) {
-    throw new Error(transition.error || 'This order status change is not allowed.');
-  }
-  if (actorRole === 'customer' && order.customerId !== actorId) {
-    throw new Error('You can only update your own order.');
-  }
-  if (actorRole === 'shopkeeper' && !order.shopId) {
-    throw new Error('This order is not linked to a marketplace shop.');
-  }
-  if (targetStatus === 'delivered' && actorRole === 'shopkeeper' &&
-      (!options.otp || order.delivery.otpCode !== options.otp.trim())) {
-    throw new Error('Invalid delivery OTP. Ask the customer to confirm the code.');
-  }
-
-  const now = new Date().toISOString();
-  const statusHistory = [
-    ...order.statusHistory,
-    {
-      status: targetStatus,
-      timestamp: now,
-      actorId,
-      actorRole,
-      reason: options.reason,
-      note: options.note,
-    },
-  ];
-  const updates: Record<string, unknown> = {
-    status: targetStatus,
-    statusHistory,
-    updatedAt: now,
-  };
-  let updatedOrder: Order = { ...order, status: targetStatus, statusHistory, updatedAt: now };
-
-  if (targetStatus === 'accepted') {
-    const invoice = {
-      id: `inv_${Date.now()}`,
-      orderId: order.id,
-      invoiceNumber: generateInvoiceNumber(),
-      billPilotInvoiceId: `BP-INV-${Math.floor(10000 + Math.random() * 90000)}`,
-      subtotal: order.subtotal,
-      deliveryCharge: order.deliveryCharge,
-      gstTotal: order.gstTotal,
-      grandTotal: order.totalAmount,
-      platformFee: order.platformCommission,
-      issuedAt: now,
-    };
-    updates.invoice = invoice;
-    updatedOrder = { ...updatedOrder, invoice };
-  }
-
-  if (targetStatus === 'out_for_delivery') {
-    const delivery = { ...order.delivery, dispatchedAt: now };
-    updates.delivery = delivery;
-    updatedOrder = { ...updatedOrder, delivery };
-  }
-
-  if (targetStatus === 'delivered') {
-    const delivery = { ...order.delivery, deliveredAt: now, otpVerified: true };
-    updates.delivery = delivery;
-    updatedOrder = { ...updatedOrder, delivery };
-    if (order.paymentMethod === 'cash_on_delivery') {
-      updates.paymentStatus = 'completed';
-      updatedOrder = { ...updatedOrder, paymentStatus: 'completed' };
+    const isRetryOfAcceptance = shouldIssueInvoice && order.status === 'accepted';
+    const transition = canTransitionOrder(order.status, targetStatus, actorRole);
+    if (!transition.allowed && !isRetryOfAcceptance) {
+      throw new Error(transition.error || 'This order status change is not allowed.');
     }
-  }
+    if (actorRole === 'customer' && order.customerId !== actorId) {
+      throw new Error('You can only update your own order.');
+    }
+    if (actorRole === 'shopkeeper' && !order.shopId) {
+      throw new Error('This order is not linked to a marketplace shop.');
+    }
+    if (targetStatus === 'delivered' && actorRole === 'shopkeeper' &&
+        (!options.otp || order.delivery.otpCode !== options.otp.trim())) {
+      throw new Error('Invalid delivery OTP. Ask the customer to confirm the code.');
+    }
 
-  if (actorRole === 'shopkeeper' &&
-      (targetStatus === 'cancelled' || targetStatus === 'rejected') &&
-      order.paymentStatus === 'authorized') {
-    updates.paymentStatus = 'refunded';
-    updatedOrder = { ...updatedOrder, paymentStatus: 'refunded' };
-  }
+    const now = new Date().toISOString();
+    const updates: Record<string, unknown> = {};
+    let invoiceDocumentData: Record<string, unknown> | null = null;
+    let updatedOrder: Order = order;
+    if (!isRetryOfAcceptance) {
+      const statusHistory = [
+        ...order.statusHistory,
+        { status: targetStatus, timestamp: now, actorId, actorRole, reason: options.reason, note: options.note },
+      ];
+      Object.assign(updates, { status: targetStatus, statusHistory, updatedAt: now });
+      updatedOrder = { ...order, status: targetStatus, statusHistory, updatedAt: now };
+    }
 
-  if (actorRole === 'shopkeeper' &&
-      (targetStatus === 'cancelled' || targetStatus === 'rejected')) {
-    const restoredQuantities = new Map<string, number>();
-    order.items.forEach((item) => {
-      restoredQuantities.set(
-        item.productId,
-        (restoredQuantities.get(item.productId) || 0) + item.quantity
-      );
-    });
-    const productEntries = Array.from(restoredQuantities, ([productId, quantity]) => ({
-      ref: doc(db, 'products', productId),
-      quantity,
-    }));
-    await runTransaction(db, async (transaction) => {
-      const currentOrderSnapshot = await transaction.get(orderRef);
-      if (!currentOrderSnapshot.exists() ||
-          currentOrderSnapshot.data().status !== order.status) {
-        throw new Error('This order changed. Refresh and try again.');
+    if (shouldIssueInvoice) {
+      let invoice = order.invoice;
+      if (!invoiceSnapshot?.exists()) {
+        const registrationData = registrationSnapshot?.exists() ? registrationSnapshot.data() : null;
+        const invoiceBlockReason = getMarketplaceInvoiceBlockReason(order, registrationData);
+        if (invoiceBlockReason) {
+          Object.assign(updates, { invoiceIssue: invoiceBlockReason });
+          updatedOrder = { ...updatedOrder, invoiceIssue: invoiceBlockReason };
+        } else {
+          const builtInvoice = buildMarketplaceInvoice(order, registrationData, now);
+          invoice = builtInvoice.reference;
+          invoiceDocumentData = builtInvoice.document;
+          Object.assign(updates, { invoice, invoiceIssue: null });
+          updatedOrder = { ...updatedOrder, invoice, invoiceIssue: undefined };
+        }
+      } else {
+        invoice = invoiceSnapshot.data() as NonNullable<Order['invoice']>;
+        if (!order.invoice) {
+          Object.assign(updates, { invoice });
+          updatedOrder = { ...updatedOrder, invoice };
+        }
       }
-      const currentProducts = await Promise.all(
-        productEntries.map(({ ref }) => transaction.get(ref))
-      );
-      transaction.update(orderRef, updates);
-      currentProducts.forEach((productSnapshot, index) => {
-        if (!productSnapshot.exists()) return;
-        const productData = productSnapshot.data();
-        const newStock = Number(productData.stockQuantity ?? 0) + productEntries[index].quantity;
-        transaction.update(productEntries[index].ref, {
-          stockQuantity: newStock,
-          isAvailable: newStock > 0,
-          updatedAt: now,
-        });
-      });
-    });
-  } else {
-    await updateDoc(orderRef, updates);
-  }
+    }
 
-  dbStore.addExternalOrder(updatedOrder);
-  return updatedOrder;
+    if (targetStatus === 'out_for_delivery' && !isRetryOfAcceptance) {
+      const delivery = { ...order.delivery, dispatchedAt: now };
+      updates.delivery = delivery;
+      updatedOrder = { ...updatedOrder, delivery };
+    }
+    if (targetStatus === 'delivered') {
+      const delivery = { ...order.delivery, deliveredAt: now, otpVerified: true };
+      updates.delivery = delivery;
+      updatedOrder = { ...updatedOrder, delivery };
+      if (order.paymentMethod === 'cash_on_delivery') {
+        updates.paymentStatus = 'completed';
+        updatedOrder = { ...updatedOrder, paymentStatus: 'completed' };
+      }
+    }
+    if (actorRole === 'shopkeeper' &&
+        (targetStatus === 'cancelled' || targetStatus === 'rejected') &&
+        order.paymentStatus === 'authorized') {
+      updates.paymentStatus = 'refunded';
+      updatedOrder = { ...updatedOrder, paymentStatus: 'refunded' };
+    }
+
+    const restoreStock = actorRole === 'shopkeeper' &&
+      (targetStatus === 'cancelled' || targetStatus === 'rejected');
+    const productEntries = restoreStock
+      ? Array.from(order.items.reduce((map, item) => {
+          map.set(item.productId, (map.get(item.productId) || 0) + item.quantity);
+          return map;
+        }, new Map<string, number>()), ([productId, quantity]) => ({
+          ref: doc(db, 'products', productId),
+          quantity,
+        }))
+      : [];
+    const productSnapshots = await Promise.all(productEntries.map(({ ref }) => transaction.get(ref)));
+    if (invoiceDocumentData) transaction.set(invoiceRef, invoiceDocumentData);
+    if (Object.keys(updates).length) transaction.update(orderRef, updates);
+    productSnapshots.forEach((snapshot, index) => {
+      if (!snapshot.exists()) return;
+      const ref = productEntries[index].ref;
+      const stock = Number(snapshot.data().stockQuantity ?? 0) + productEntries[index].quantity;
+      transaction.update(ref, { stockQuantity: stock, isAvailable: stock > 0, updatedAt: now });
+    });
+    result = updatedOrder;
+  });
+
+  if (!result) throw new Error('Order update did not produce a result.');
+  dbStore.addExternalOrder(result);
+  return result;
 }
 
 export async function processAtomicOrder(input: PlaceOrderInput): Promise<OrderPlacementResult> {
@@ -327,24 +360,61 @@ export async function processAtomicOrder(input: PlaceOrderInput): Promise<OrderP
   if (!isFirebaseConfigured) {
     throw new Error('Online ordering is unavailable because marketplace cloud sync is not configured.');
   }
+  if (!auth.currentUser || auth.currentUser.uid !== input.customerId) {
+    throw new Error('Sign in with the customer account that is placing this order.');
+  }
 
   // 1. If Firebase is configured and online, execute atomic Firestore transaction
   if (isFirebaseConfigured && db) {
     try {
       const orderNumber = generateOrderNumber();
       const deliveryOTP = generateDeliveryOTP();
-      const orderId = 'ord_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+      const orderId = input.idempotencyKey
+        ? `ord_${input.idempotencyKey}`
+        : 'ord_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+      const idempotencySignature = JSON.stringify({
+        customerId: input.customerId,
+        shopId: input.shopId,
+        paymentMethod: input.paymentMethod,
+        deliveryAddress: input.deliveryAddress,
+        items: input.items
+          .map((item) => ({ productId: item.productId || item.listingId, quantity: item.quantity }))
+          .sort((left, right) => left.productId.localeCompare(right.productId)),
+      });
 
       const orderRef = doc(db, 'orders', orderId);
       const shopRef = doc(db, 'shops', input.shopId);
+      const customerProfileRef = doc(db, 'users', input.customerId);
+      const shopCustomerRef = doc(db, 'shops', input.shopId, 'marketplaceCustomers', input.customerId);
 
       const placedOrder = await runTransaction(db, async (txn) => {
+        const existingOrderSnap = await txn.get(orderRef);
+        if (existingOrderSnap.exists()) {
+          const existingOrder = orderFromFirestore(
+            existingOrderSnap.id,
+            existingOrderSnap.data() as Record<string, unknown>
+          );
+          if (existingOrder.customerId !== input.customerId ||
+              existingOrder.shopId !== input.shopId ||
+              existingOrder.idempotencySignature !== idempotencySignature) {
+            throw new Error('This order submission key was already used for different order details.');
+          }
+          return existingOrder;
+        }
         // A. Read shop document
         const shopSnap = await txn.get(shopRef);
         if (!shopSnap.exists()) {
           throw new Error('Merchant shop does not exist or has been removed.');
         }
         const shopData = shopSnap.data();
+        const [customerProfileSnap, shopCustomerSnap] = await Promise.all([
+          txn.get(customerProfileRef),
+          txn.get(shopCustomerRef),
+        ]);
+        const customerProfile = customerProfileSnap.exists() ? customerProfileSnap.data() : {};
+        const canonicalName = String(customerProfile.name || input.customerName || '');
+        const canonicalPhone = String(customerProfile.phone || input.customerPhone || input.deliveryAddress.phoneNumber || '');
+        const canonicalEmail = String(customerProfile.email || auth.currentUser?.email || '');
         if (shopData.deliverySettings && shopData.deliverySettings.isAcceptingOrders === false) {
           throw new Error('This shop is currently not accepting new orders.');
         }
@@ -404,7 +474,10 @@ export async function processAtomicOrder(input: PlaceOrderInput): Promise<OrderP
           const lineTotal = authoritativeUnitPrice * item.quantity;
           calculatedSubtotalPaise += lineTotal;
 
-          const gstRate = Number(pData.standardGSTRate ?? 5);
+          const gstRate = Number(pData.standardGSTRate);
+          if (!Number.isFinite(gstRate) || gstRate < 0 || gstRate > 100) {
+            throw new Error(`GST rate is missing or invalid for "${pData.name || 'this product'}". The order cannot be invoiced safely.`);
+          }
           const lineGst = Math.round((lineTotal * gstRate) / (100 + gstRate));
           calculatedGstPaise += lineGst;
 
@@ -441,10 +514,12 @@ export async function processAtomicOrder(input: PlaceOrderInput): Promise<OrderP
 
         const orderRecord: Order = {
           id: orderId,
+          idempotencySignature,
           orderNumber,
           customerId: input.customerId,
-          customerName: input.customerName,
-          customerPhone: input.customerPhone,
+          customerName: canonicalName,
+          customerPhone: canonicalPhone,
+          customerEmail: canonicalEmail,
           shopId: input.shopId,
           shopName: shopData.name || 'Neighborhood Store',
           shopPhone: shopData.phone || '',
@@ -489,6 +564,20 @@ export async function processAtomicOrder(input: PlaceOrderInput): Promise<OrderP
 
         // D. Create authoritative order document
         txn.set(orderRef, orderRecord);
+        txn.set(shopCustomerRef, {
+          customerId: input.customerId,
+          ...(canonicalName ? { name: canonicalName } : {}),
+          ...(canonicalPhone ? { phone: canonicalPhone } : {}),
+          ...(canonicalEmail ? { email: canonicalEmail } : {}),
+          firstOrderAt: shopCustomerSnap.exists()
+            ? shopCustomerSnap.data().firstOrderAt || orderRecord.createdAt
+            : orderRecord.createdAt,
+          lastOrderAt: orderRecord.createdAt,
+          lastOrderId: orderId,
+          createdAt: shopCustomerSnap.exists()
+            ? shopCustomerSnap.data().createdAt || orderRecord.createdAt
+            : orderRecord.createdAt,
+        });
 
         return orderRecord;
       });

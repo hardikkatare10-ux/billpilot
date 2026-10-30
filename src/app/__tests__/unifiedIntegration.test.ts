@@ -1,5 +1,5 @@
 /**
- * Dukan Yantra and NearBasket - Unified Acceptance Scenarios Test Suite
+ * BillPilot - Unified Acceptance Scenarios Test Suite
  * 
  * Verifies Phase 10 acceptance scenarios:
  * 1. Consumer registration & marketplace access

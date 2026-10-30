@@ -6,6 +6,49 @@ service firebase.storage {
       return request.auth != null;
     }
 
+    function isAdmin() {
+      return isSignedIn() && (
+        ('admin' in request.auth.token && request.auth.token.admin == true) ||
+        request.auth.token.email == "hardikkatare10@gmail.com" ||
+        request.auth.token.email == "admin@billpilot.app"
+      );
+    }
+
+    function isSupportedPhoto() {
+      return request.resource != null
+        && request.resource.size > 0
+        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.contentType in ['image/jpeg', 'image/png', 'image/webp'];
+    }
+
+    function isSupportedBusinessDocument() {
+      return request.resource != null
+        && request.resource.size > 0
+        && request.resource.size <= 10 * 1024 * 1024
+        && request.resource.contentType in [
+          'application/pdf', 'image/jpeg', 'image/png', 'image/webp'
+        ];
+    }
+
+    // Private verification evidence: only its authenticated owner and platform admins can read it.
+    match /shop-verification/{ownerUid}/{shopId}/photos/{photoKey} {
+      allow read: if isSignedIn() && (request.auth.uid == ownerUid || isAdmin());
+      allow create: if isSignedIn()
+        && request.auth.uid == ownerUid
+        && photoKey.matches('^(exterior|interior|shopkeeper)-[0-9a-f]{64}$')
+        && isSupportedPhoto();
+      allow update, delete: if false;
+    }
+
+    match /shop-verification/{ownerUid}/{shopId}/documents/{documentId} {
+      allow read: if isSignedIn() && (request.auth.uid == ownerUid || isAdmin());
+      allow create: if isSignedIn()
+        && request.auth.uid == ownerUid
+        && documentId.matches('^(business|additional-[1-3])-[0-9a-f]{64}$')
+        && isSupportedBusinessDocument();
+      allow update, delete: if false;
+    }
+
     // Business logos, private documents
     match /users/{userId}/{allPaths=**} {
       allow read: if isSignedIn();

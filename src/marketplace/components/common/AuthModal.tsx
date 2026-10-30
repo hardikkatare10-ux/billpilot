@@ -4,10 +4,22 @@
  * Provides authentic Sign In, Customer Registration, and Local Shop Onboarding.
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { X, LogIn, Store, UserPlus, AlertCircle, CheckCircle, ShieldCheck, Eye, EyeOff } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { dbStore } from '../../services/db/store';
 import { MapLocationPicker, PickedLocation } from './MapLocationPicker';
+import {
+  BUSINESS_DOCUMENT_MAX_BYTES,
+  SHOP_PHOTO_MAX_BYTES,
+  getShopVerificationCompletenessError,
+  validateShopVerificationFiles,
+  validateUploadFile,
+  type BusinessDocumentType,
+  type ShopPhotoKind,
+  type ShopVerificationFiles,
+  type ShopVerificationUploadProgress,
+} from '../../services/firebase/shopVerification';
 
 export const AuthModal: React.FC = () => {
   const {
@@ -20,6 +32,7 @@ export const AuthModal: React.FC = () => {
     registerCustomer,
     registerShopkeeper,
     allUsers,
+    currentUser,
   } = useAuth();
 
   const [email, setEmail] = useState('');
@@ -66,6 +79,71 @@ export const AuthModal: React.FC = () => {
   const [shopMinOrder, setShopMinOrder] = useState(99);
   const [shopGstin, setShopGstin] = useState('');
   const [shopFssai, setShopFssai] = useState('');
+  const [shopPhotos, setShopPhotos] = useState<Partial<Record<ShopPhotoKind, File>>>({});
+  const [businessDocument, setBusinessDocument] = useState<File | null>(null);
+  const [businessDocumentType, setBusinessDocumentType] = useState<BusinessDocumentType>('gumasta');
+  const [additionalBusinessDocuments, setAdditionalBusinessDocuments] = useState<
+    { id: string; file: File | null; type: BusinessDocumentType }[]
+  >([]);
+  const [verificationPreviews, setVerificationPreviews] = useState<Record<string, string>>({});
+  const [verificationFileError, setVerificationFileError] = useState<string | null>(null);
+  const [verificationFilesValidated, setVerificationFilesValidated] = useState(false);
+  const [isSubmittingShop, setIsSubmittingShop] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
+  const isExistingShopApplication = currentUser?.requestedRole === 'shopkeeper' &&
+    currentUser.shopkeeperStatus === 'pending' && Boolean(currentUser.shopId);
+
+  useEffect(() => {
+    if (!isExistingShopApplication || !currentUser?.shopId) return;
+    const shop = dbStore.getShopById(currentUser.shopId);
+    if (!shop) return;
+    setShopOwnerName(shop.ownerName);
+    setShopEmail(shop.email);
+    setShopPhone(shop.phone);
+    setShopName(shop.name);
+    setShopCategory(shop.category);
+    setShopDesc(shop.description);
+    setShopStreet(shop.address.street);
+    setShopLocality(shop.address.locality);
+    setShopCity(shop.address.city);
+    setShopPincodes((shop.deliverySettings.serviceablePincodes || []).join(', '));
+    setShopLocation(shop.address.coordinates
+      ? { coordinates: shop.address.coordinates, mapsLink: '' }
+      : null);
+    setShopGstin(shop.verificationDetails?.gstin || '');
+  }, [isExistingShopApplication, currentUser?.shopId]);
+
+  useEffect(() => {
+    const files = { ...shopPhotos, businessDocument };
+    const urls: Record<string, string> = {};
+    Object.entries(files).forEach(([key, file]) => {
+      if (file) urls[key] = URL.createObjectURL(file);
+    });
+    additionalBusinessDocuments.forEach((document) => {
+      if (document.file) urls[`additional-${document.id}`] = URL.createObjectURL(document.file);
+    });
+    setVerificationPreviews(urls);
+    setVerificationFilesValidated(false);
+    if (shopPhotos.exterior && shopPhotos.interior && shopPhotos.shopkeeper && businessDocument) {
+      const completeFiles: ShopVerificationFiles = {
+        exterior: shopPhotos.exterior,
+        interior: shopPhotos.interior,
+        shopkeeper: shopPhotos.shopkeeper,
+        businessDocument,
+        businessDocumentType,
+        additionalDocuments: additionalBusinessDocuments
+          .filter((document): document is { id: string; file: File; type: BusinessDocumentType } => Boolean(document.file))
+          .map(({ file, type }) => ({ file, type })),
+      };
+      void validateShopVerificationFiles(completeFiles).then(() => {
+        setVerificationFileError(null);
+        setVerificationFilesValidated(true);
+      }).catch((error: unknown) => {
+        setVerificationFileError(error instanceof Error ? error.message : 'One or more files are invalid.');
+      });
+    }
+    return () => Object.values(urls).forEach((url) => URL.revokeObjectURL(url));
+  }, [shopPhotos, businessDocument, businessDocumentType, additionalBusinessDocuments]);
 
   if (!isAuthModalOpen) return null;
 
@@ -107,11 +185,41 @@ export const AuthModal: React.FC = () => {
   const handleRegisterShop = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    if (!shopLocation) {
+    if (!shopLocation && !isExistingShopApplication) {
       setError('Please share your shop location using Google Maps or current location.');
       return;
     }
+    const completenessError = getShopVerificationCompletenessError({
+      ...shopPhotos,
+      businessDocument: businessDocument || undefined,
+      businessDocumentType,
+    });
+    if (completenessError) {
+      setError(completenessError);
+      return;
+    }
+    if (!shopPhotos.exterior || !shopPhotos.interior || !shopPhotos.shopkeeper || !businessDocument) {
+      setError('Upload all three shop photographs and a business document before continuing.');
+      return;
+    }
+    const verificationFiles: ShopVerificationFiles = {
+      exterior: shopPhotos.exterior,
+      interior: shopPhotos.interior,
+      shopkeeper: shopPhotos.shopkeeper,
+      businessDocument,
+      businessDocumentType,
+      additionalDocuments: additionalBusinessDocuments
+        .filter((document): document is { id: string; file: File; type: BusinessDocumentType } => Boolean(document.file))
+        .map(({ file, type }) => ({ file, type })),
+    };
+    if (additionalBusinessDocuments.some((document) => !document.file)) {
+      setError('Choose a file for each additional business document or remove the empty document row.');
+      return;
+    }
+    setIsSubmittingShop(true);
+    setUploadProgress({});
     try {
+      await validateShopVerificationFiles(verificationFiles);
       await registerShopkeeper({
         ownerName: shopOwnerName,
         email: shopEmail,
@@ -127,17 +235,41 @@ export const AuthModal: React.FC = () => {
           .split(/[,\s]+/)
           .map((x) => x.trim())
           .filter(Boolean),
-        coordinates: shopLocation.coordinates,
+        coordinates: shopLocation?.coordinates || { latitude: 0, longitude: 0 },
         serviceRadiusKm: 10,
         baseDeliveryChargeRupees: Number(shopBaseCharge),
         minOrderValueRupees: Number(shopMinOrder),
         gstin: shopGstin,
         fssaiLicense: shopFssai,
+        verificationFiles,
+        onUploadProgress: ({ file, percent }: ShopVerificationUploadProgress) => {
+          setUploadProgress((current) => ({ ...current, [file]: percent }));
+        },
       });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Shop registration failed');
+    } finally {
+      setIsSubmittingShop(false);
     }
   };
+
+  const setPhotoFile = (kind: ShopPhotoKind, file?: File) => {
+    if (!file) return;
+    const fileError = validateUploadFile(file, ['image/jpeg', 'image/png', 'image/webp'], SHOP_PHOTO_MAX_BYTES);
+    if (fileError) {
+      setVerificationFileError(fileError);
+      return;
+    }
+    setUploadProgress((current) => ({ ...current, [kind]: 0 }));
+    setVerificationFileError(null);
+    setShopPhotos((current) => ({ ...current, [kind]: file }));
+  };
+
+  const photoLabels: { kind: ShopPhotoKind; label: string; help: string }[] = [
+    { kind: 'exterior', label: 'Shop exterior', help: 'Entrance, signboard and storefront' },
+    { kind: 'interior', label: 'Shop interior', help: 'Interior, products or shelves' },
+    { kind: 'shopkeeper', label: 'Shopkeeper at the shop', help: 'You inside or just outside the shop' },
+  ];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto">
@@ -468,6 +600,10 @@ export const AuthModal: React.FC = () => {
           {/* TAB 3: REGISTER SHOP */}
           {authModalMode === 'register_shopkeeper' && (
             <form onSubmit={handleRegisterShop} className="space-y-3">
+              <h3 className="border-b border-slate-200 pb-1 text-sm font-bold text-slate-900">
+                {isExistingShopApplication ? 'Existing Shop Details' : '1. Shop Details'}
+              </h3>
+              <fieldset disabled={isExistingShopApplication} className="space-y-3">
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="font-semibold text-slate-700 block mb-1">Owner Name</label>
@@ -510,8 +646,8 @@ export const AuthModal: React.FC = () => {
                   <div className="relative">
                     <input
                       type={showPassword ? 'text' : 'password'}
-                      required
-                      placeholder="Min. 6 characters..."
+                      required={!isExistingShopApplication}
+                      placeholder={isExistingShopApplication ? 'Already signed in' : 'Min. 6 characters...'}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       className="w-full px-3 py-2 pr-10 bg-white border border-slate-300 rounded-lg text-xs"
@@ -661,13 +797,197 @@ export const AuthModal: React.FC = () => {
                   />
                 </div>
               </div>
+              </fieldset>
+
+              <h3 className="border-b border-slate-200 pb-1 pt-2 text-sm font-bold text-slate-900">2. Shop Photographs</h3>
+              <p className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs leading-relaxed text-blue-900">
+                Upload at least 3 clear photographs of your shop: the exterior, the interior and yourself at the shop. Your application will be reviewed by our admin team before the shop can become active.
+              </p>
+              <div className="space-y-3">
+                {photoLabels.map(({ kind, label, help }) => {
+                  const file = shopPhotos[kind];
+                  return (
+                    <div key={kind} className="rounded-lg border border-slate-200 p-3">
+                      <label className="font-semibold text-slate-700 block mb-1">{label}</label>
+                      <p className="mb-2 text-[11px] text-slate-500">{help}</p>
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        required={!file}
+                        onChange={(event) => setPhotoFile(kind, event.target.files?.[0])}
+                        className="block w-full text-[11px] text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-blue-50 file:px-3 file:py-1.5 file:font-semibold file:text-blue-700"
+                      />
+                      {file && (
+                        <div className="mt-2 flex items-center gap-3">
+                          {verificationPreviews[kind] && <img src={verificationPreviews[kind]} alt={`${label} preview`} className="h-16 w-20 rounded border border-slate-200 object-cover" />}
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate font-medium text-slate-700">{file.name}</p>
+                            <p className="text-[10px] text-slate-500">{(file.size / (1024 * 1024)).toFixed(2)} MB · {uploadProgress[kind] ?? 0}% uploaded</p>
+                            <progress className="mt-1 h-1.5 w-full" value={uploadProgress[kind] ?? 0} max="100" />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <h3 className="border-b border-slate-200 pb-1 pt-2 text-sm font-bold text-slate-900">3. Business Documents</h3>
+              <p className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs leading-relaxed text-blue-900">
+                Upload at least one valid document supporting your shop or business registration, such as a Gumasta certificate, Udyam Registration Certificate, GST Registration Certificate if applicable, or another document accepted during verification. Your shop will remain pending until admin review is completed.
+              </p>
+              <p className="text-[11px] text-slate-600">
+                The document must genuinely relate to you or the shop being registered. A GST certificate is not required from every shop.
+              </p>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <div>
+                  <label className="font-semibold text-slate-700 block mb-1">Document type</label>
+                  <select
+                    value={businessDocumentType}
+                    onChange={(event) => setBusinessDocumentType(event.target.value as BusinessDocumentType)}
+                    className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs"
+                  >
+                    <option value="gumasta">Gumasta / Shop and Establishment</option>
+                    <option value="udyam">Udyam Registration Certificate</option>
+                    <option value="gst_certificate">GST Registration Certificate (if applicable)</option>
+                    <option value="other">Other accepted business document</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="font-semibold text-slate-700 block mb-1">Business document</label>
+                  <input
+                    type="file"
+                    accept="application/pdf,image/jpeg,image/png,image/webp"
+                    required={!businessDocument}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (!file) return;
+                      const fileError = validateUploadFile(
+                        file,
+                        ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'],
+                        BUSINESS_DOCUMENT_MAX_BYTES
+                      );
+                      if (fileError) {
+                        setVerificationFileError(fileError);
+                        return;
+                      }
+                      setUploadProgress((current) => ({ ...current, 'business document': 0 }));
+                      setVerificationFileError(null);
+                      setBusinessDocument(file);
+                    }}
+                    className="block w-full text-[11px] text-slate-600 file:mr-2 file:rounded-md file:border-0 file:bg-blue-50 file:px-2 file:py-1.5 file:font-semibold file:text-blue-700"
+                  />
+                </div>
+              </div>
+              {businessDocument && (
+                <div className="flex items-center gap-3 rounded-lg border border-slate-200 p-2">
+                  {verificationPreviews.businessDocument && businessDocument.type.startsWith('image/') && (
+                    <img src={verificationPreviews.businessDocument} alt="Business document preview" className="h-14 w-16 rounded border border-slate-200 object-cover" />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-medium text-slate-700">{businessDocument.name}</p>
+                    <p className="text-[10px] text-slate-500">{(businessDocument.size / (1024 * 1024)).toFixed(2)} MB · {uploadProgress['business document'] ?? 0}% uploaded</p>
+                    <progress className="mt-1 h-1.5 w-full" value={uploadProgress['business document'] ?? 0} max="100" />
+                  </div>
+                </div>
+              )}
+              {additionalBusinessDocuments.map((document, index) => (
+                <div key={document.id} className="space-y-2 rounded-lg border border-slate-200 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="font-semibold text-slate-700">Additional document {index + 1}</label>
+                    <button
+                      type="button"
+                      onClick={() => setAdditionalBusinessDocuments((current) => current.filter((item) => item.id !== document.id))}
+                      className="text-[11px] font-semibold text-rose-700"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                  <select
+                    value={document.type}
+                    onChange={(event) => setAdditionalBusinessDocuments((current) => current.map((item) =>
+                      item.id === document.id
+                        ? { ...item, type: event.target.value as BusinessDocumentType }
+                        : item
+                    ))}
+                    className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs"
+                  >
+                    <option value="gumasta">Gumasta / Shop and Establishment</option>
+                    <option value="udyam">Udyam Registration Certificate</option>
+                    <option value="gst_certificate">GST Registration Certificate (if applicable)</option>
+                    <option value="other">Other accepted business document</option>
+                  </select>
+                  <input
+                    type="file"
+                    accept="application/pdf,image/jpeg,image/png,image/webp"
+                    required={!document.file}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (!file) return;
+                      const fileError = validateUploadFile(
+                        file,
+                        ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'],
+                        BUSINESS_DOCUMENT_MAX_BYTES
+                      );
+                      if (fileError) {
+                        setVerificationFileError(fileError);
+                        return;
+                      }
+                      setVerificationFileError(null);
+                      setAdditionalBusinessDocuments((current) => current.map((item) =>
+                        item.id === document.id ? { ...item, file } : item
+                      ));
+                    }}
+                    className="block w-full text-[11px] text-slate-600 file:mr-2 file:rounded-md file:border-0 file:bg-blue-50 file:px-2 file:py-1.5 file:font-semibold file:text-blue-700"
+                  />
+                  {document.file && (
+                    <div className="flex items-center gap-3">
+                      {verificationPreviews[`additional-${document.id}`] && document.file.type.startsWith('image/') && (
+                        <img src={verificationPreviews[`additional-${document.id}`]} alt={`Additional document ${index + 1} preview`} className="h-12 w-14 rounded border border-slate-200 object-cover" />
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[11px] font-medium text-slate-700">{document.file.name}</p>
+                        <p className="text-[10px] text-slate-500">{uploadProgress[document.file.name] ?? 0}% uploaded</p>
+                        <progress className="mt-1 h-1.5 w-full" value={uploadProgress[document.file.name] ?? 0} max="100" />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+              {additionalBusinessDocuments.length < 3 && (
+                <button
+                  type="button"
+                  onClick={() => setAdditionalBusinessDocuments((current) => [
+                    ...current,
+                    { id: globalThis.crypto?.randomUUID?.() || String(Date.now()), file: null, type: 'other' },
+                  ])}
+                  className="rounded-lg border border-dashed border-blue-300 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50"
+                >
+                  Add another business document
+                </button>
+              )}
+              {verificationFileError && <p role="alert" className="text-xs font-medium text-rose-700">{verificationFileError}</p>}
+
+              <h3 className="border-b border-slate-200 pb-1 pt-2 text-sm font-bold text-slate-900">4. Review and Submit</h3>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-700">
+                <p className={shopPhotos.exterior && shopPhotos.interior && shopPhotos.shopkeeper ? 'text-emerald-700' : ''}>
+                  {shopPhotos.exterior && shopPhotos.interior && shopPhotos.shopkeeper ? '✓' : '○'} Three different shop photographs uploaded
+                </p>
+                <p className={businessDocument ? 'text-emerald-700' : ''}>
+                  {businessDocument ? '✓' : '○'} One business document selected
+                </p>
+                <p className={shopLocation ? 'text-emerald-700' : ''}>
+                  {shopLocation ? '✓' : '○'} Shop location provided
+                </p>
+              </div>
 
               <button
                 type="submit"
-                className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-xs transition-colors flex items-center justify-center gap-2 cursor-pointer mt-2"
+                disabled={isSubmittingShop || !shopPhotos.exterior || !shopPhotos.interior || !shopPhotos.shopkeeper || !businessDocument || !verificationFilesValidated || !shopLocation || additionalBusinessDocuments.some((document) => !document.file)}
+                className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-xs transition-colors flex items-center justify-center gap-2 cursor-pointer mt-2 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Store className="w-4 h-4" />
-                Complete Store Onboarding
+                {isSubmittingShop ? 'Uploading documents and submitting…' : 'Submit Shop for Admin Verification'}
               </button>
             </form>
           )}

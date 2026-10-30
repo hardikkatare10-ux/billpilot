@@ -8,6 +8,7 @@
 import React, { useState, useEffect } from 'react';
 import { APIProvider } from '@vis.gl/react-google-maps';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { useUnifiedAuth } from '../context/UnifiedAuthContext';
 import { CartProvider, useCart } from './context/CartContext';
 import { LocationProvider } from './context/LocationContext';
 import { dbStore } from './services/db/store';
@@ -34,6 +35,7 @@ const GOOGLE_MAPS_API_KEY = (import.meta as any).env?.VITE_GOOGLE_MAPS_API_KEY |
 
 const MainLayout: React.FC = () => {
   const { currentUser, isApprovedShopkeeper, openAuthModal } = useAuth();
+  const { setShopVerification, setShopGstRegistration, reviewShopVerificationApplication } = useUnifiedAuth();
   const { setIsCartDrawerOpen } = useCart();
 
   // Navigation state
@@ -274,6 +276,9 @@ const MainLayout: React.FC = () => {
             auditLogs={auditLogs}
             commissionLedger={commissionLedger}
             onRefreshData={refreshData}
+            onShopStatusChange={setShopVerification}
+            onShopGstRegistrationChange={setShopGstRegistration}
+            onShopApplicationReview={reviewShopVerificationApplication}
           />
         )}
       </main>

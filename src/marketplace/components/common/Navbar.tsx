@@ -38,7 +38,11 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
             onClick={() => onSelectTab('discover')}
             className="flex items-center gap-2 text-lg md:text-xl font-black tracking-tight text-blue-600 whitespace-nowrap shrink-0 cursor-pointer"
           >
-            <img src={nearBasketLogo} alt="NearBasket logo" className="w-9 h-9 sm:w-10 sm:h-10 object-contain shrink-0" />
+            <img
+              src={nearBasketLogo}
+              alt="NearBasket logo"
+              className="w-9 h-9 sm:w-10 sm:h-10 object-contain shrink-0"
+            />
             <span>NearBasket</span>
           </button>
 

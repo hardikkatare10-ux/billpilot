@@ -1,6 +1,6 @@
 export type AccountRole = 'customer' | 'shopkeeper' | 'admin';
 export type RegistrationRole = 'customer' | 'shopkeeper';
-export type ShopkeeperStatus = 'none' | 'pending' | 'approved' | 'rejected';
+export type ShopkeeperStatus = 'none' | 'pending' | 'approved' | 'rejected' | 'suspended';
 
 export interface RegistrationRoleFields {
   role: RegistrationRole;

@@ -5,7 +5,7 @@
  * commission settlements, system audit logs, and global ERP synchronization.
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ShieldCheck,
   Store,
@@ -33,6 +33,34 @@ import { formatINR } from '../../utils/formatters';
 import { dbStore } from '../../services/db/store';
 import { InvoiceModal } from '../common/InvoiceModal';
 import { AreaDirectoryAdmin } from './AreaDirectoryAdmin';
+import { doc, getDoc } from 'firebase/firestore';
+import { db } from '../../services/firebase/config';
+import type { GstRegistrationStatus } from '../../../app/invoiceRules';
+import {
+  readPrivateVerificationFile,
+  type ShopApplicationStatus,
+} from '../../services/firebase/shopVerification';
+
+interface PrivateVerificationFile {
+  path: string;
+  name: string;
+  contentType: string;
+  size: number;
+  sha256?: string;
+}
+
+interface PrivateVerificationApplication {
+  status: ShopApplicationStatus;
+  submittedAt?: string;
+  requestMessage?: string;
+  applicantName?: string;
+  applicantEmail?: string;
+  applicantPhone?: string;
+  address?: Shop['address'];
+  photos?: Record<'exterior' | 'interior' | 'shopkeeper', PrivateVerificationFile>;
+  businessDocument?: PrivateVerificationFile & { type: string };
+  additionalDocuments?: (PrivateVerificationFile & { type: string })[];
+}
 
 interface AdminDashboardProps {
   shops: Shop[];
@@ -47,6 +75,17 @@ interface AdminDashboardProps {
     status: Shop['verificationStatus'],
     notes?: string
   ) => Promise<void>;
+  onShopGstRegistrationChange?: (
+    shopId: string,
+    status: GstRegistrationStatus,
+    gstin: string,
+    reason: string
+  ) => Promise<void>;
+  onShopApplicationReview?: (
+    shopId: string,
+    status: ShopApplicationStatus,
+    reason: string
+  ) => Promise<void>;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
@@ -58,11 +97,75 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   commissionLedger,
   onRefreshData,
   onShopStatusChange,
+  onShopGstRegistrationChange,
+  onShopApplicationReview,
 }) => {
   const [activeTab, setActiveTab] = useState<
     'applications' | 'shops' | 'areas' | 'orders' | 'disputes' | 'commissions' | 'sync' | 'audit'
   >('applications');
   const [processingShopId, setProcessingShopId] = useState<string | null>(null);
+  const [gstDrafts, setGstDrafts] = useState<Record<string, {
+    status: GstRegistrationStatus;
+    gstin: string;
+    reason: string;
+    requestedScheme?: string;
+  }>>({});
+  const [processingGstShopId, setProcessingGstShopId] = useState<string | null>(null);
+  const [verificationApplications, setVerificationApplications] = useState<
+    Record<string, PrivateVerificationApplication | null>
+  >({});
+  const [verificationFilePreview, setVerificationFilePreview] = useState<{
+    url: string;
+    label: string;
+    contentType: string;
+  } | null>(null);
+  const [reviewedVerificationPaths, setReviewedVerificationPaths] = useState<Record<string, string[]>>({});
+  const [isLoadingVerificationFile, setIsLoadingVerificationFile] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(shops.map(async (shop) => {
+      const snapshot = await getDoc(doc(db, 'shops', shop.id, 'private', 'gstRegistration'));
+      const data = snapshot.exists() ? snapshot.data() : {};
+      return [shop.id, {
+        status: (data.status as GstRegistrationStatus) || 'pending_verification',
+        gstin: typeof data.gstin === 'string' ? data.gstin : shop.verificationDetails?.gstin || '',
+        reason: '',
+        requestedScheme: typeof data.requestedScheme === 'string' ? data.requestedScheme : '',
+      }] as const;
+    })).then((entries) => {
+      if (!cancelled) {
+        setGstDrafts((current) => Object.fromEntries(entries.map(([shopId, draft]) => [
+          shopId,
+          current[shopId] ? { ...draft, reason: current[shopId].reason } : draft,
+        ])));
+      }
+    }).catch((error) => {
+      console.error('Could not load private shop GST verification records:', error);
+    });
+    return () => { cancelled = true; };
+  }, [shops]);
+
+  useEffect(() => () => {
+    if (verificationFilePreview?.url) URL.revokeObjectURL(verificationFilePreview.url);
+  }, [verificationFilePreview]);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(shops.map(async (shop) => {
+      const snapshot = await getDoc(doc(db, 'shops', shop.id, 'private', 'verificationApplication'));
+      return [shop.id, snapshot.exists()
+        ? snapshot.data() as PrivateVerificationApplication
+        : null] as const;
+    })).then((entries) => {
+      if (!cancelled) {
+        setVerificationApplications(Object.fromEntries(entries));
+      }
+    }).catch((error) => {
+      console.error('Could not load private shop verification applications:', error);
+    });
+    return () => { cancelled = true; };
+  }, [shops]);
 
   const [selectedInvoiceOrder, setSelectedInvoiceOrder] = useState<Order | null>(null);
   const [arbitrateModal, setArbitrateModal] = useState<{
@@ -110,23 +213,86 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  const processShopApplication = async (
-    shopId: string,
-    status: 'verified' | 'rejected'
-  ) => {
-    if (status === 'rejected' && !window.confirm('Reject this shopkeeper application?')) {
+  const handleShopGstRegistrationChange = async (shopId: string) => {
+    const draft = gstDrafts[shopId];
+    if (!draft || !draft.reason.trim() || !onShopGstRegistrationChange) {
+      alert('Select a GST status, provide a reason, and ensure the admin verification action is configured.');
       return;
     }
+    setProcessingGstShopId(shopId);
+    try {
+      await onShopGstRegistrationChange(shopId, draft.status, draft.gstin, draft.reason);
+      setGstDrafts((current) => ({
+        ...current,
+        [shopId]: { ...draft, reason: '' },
+      }));
+      onRefreshData();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Could not update GST registration status.');
+    } finally {
+      setProcessingGstShopId(null);
+    }
+  };
+
+  const processShopApplication = async (
+    shopId: string,
+    status: 'approved' | 'rejected' | 'additional_information_required'
+  ) => {
+    if (!onShopApplicationReview) {
+      alert('Secure shop application review is not configured.');
+      return;
+    }
+    const actionLabel = status === 'approved'
+      ? 'Approve this shop after reviewing all submitted materials?'
+      : status === 'rejected'
+        ? 'Enter a reason for rejecting this application:'
+        : 'Enter the additional information required from the applicant:';
+    const reason = window.prompt(actionLabel, status === 'approved' ? 'Reviewed submitted materials.' : '');
+    if (reason === null || (status !== 'approved' && !reason.trim())) return;
     setProcessingShopId(shopId);
     try {
-      await handleShopStatusChange(
-        shopId,
-        status,
-        status === 'verified' ? 'Shopkeeper application approved by admin' : 'Shopkeeper application rejected by admin'
-      );
+      await onShopApplicationReview(shopId, status, reason);
+      onRefreshData();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Could not update the shop application.');
     } finally {
       setProcessingShopId(null);
     }
+  };
+
+  const openVerificationFile = async (file: PrivateVerificationFile, label: string) => {
+    setIsLoadingVerificationFile(true);
+    try {
+      const url = await readPrivateVerificationFile(file.path);
+      setVerificationFilePreview({ url, label, contentType: file.contentType });
+      const reviewKey = `${file.path}:${file.sha256 || file.size}`;
+      setReviewedVerificationPaths((current) => ({
+        ...current,
+        [reviewKey]: [...(current[reviewKey] || []), label],
+      }));
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Could not securely open this verification file.');
+    } finally {
+      setIsLoadingVerificationFile(false);
+    }
+  };
+
+  const suspendShop = async (shop: Shop) => {
+    const reason = window.prompt('Enter the reason for suspending this shop:');
+    if (!reason?.trim()) return;
+    if (onShopApplicationReview && verificationApplications[shop.id]?.status === 'approved') {
+      setProcessingShopId(shop.id);
+      try {
+        await onShopApplicationReview(shop.id, 'suspended', reason.trim());
+        onRefreshData();
+      } catch (error) {
+        alert(error instanceof Error ? error.message : 'Could not suspend this shop.');
+      } finally {
+        setProcessingShopId(null);
+      }
+      return;
+    }
+    await handleShopStatusChange(shop.id, 'suspended', reason.trim());
   };
 
   const handleExecuteArbitration = (e: React.FormEvent) => {
@@ -216,7 +382,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {/* Admin Navigation Tabs */}
       <div className="flex items-center gap-1 overflow-x-auto pb-1 border-b border-slate-200 scrollbar-none text-xs">
         {[
-          { key: 'applications', label: `Shopkeeper Requests (${pendingShops.length})`, icon: ClipboardCheck },
+          { key: 'applications', label: `Shop Verification Requests (${pendingShops.length})`, icon: ClipboardCheck },
           { key: 'shops', label: `Shops & KYC (${shops.length})`, icon: Store },
           { key: 'areas', label: `Area Directory (${dbStore.getAreas().length})`, icon: MapPin },
           { key: 'orders', label: `All Orders (${orders.length})`, icon: FileText },
@@ -250,10 +416,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <div className="flex items-start justify-between gap-4">
             <div>
               <h2 id="shopkeeper-requests-heading" className="text-lg font-bold text-slate-900">
-                Shopkeeper Applications
+                Shop Verification Requests
               </h2>
               <p className="mt-1 text-xs text-slate-500">
-                Review the submitted store details, then approve or reject each pending request.
+                Compare the shop details, submitted photographs and business document. Approval records an admin review; it does not certify legal compliance or prove ownership.
               </p>
             </div>
             <span className="shrink-0 rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-800">
@@ -306,8 +472,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       <div>
                         <dt className="text-slate-500">Location</dt>
                         <dd className="mt-0.5 font-semibold text-slate-900">
-                          {[shop.address.locality, shop.address.city, shop.address.pincode].filter(Boolean).join(', ') || 'Not provided'}
+                          {[shop.address.street, shop.address.locality, shop.address.city, shop.address.pincode].filter(Boolean).join(', ') || 'Not provided'}
+                          {shop.address.coordinates && (
+                            <span className="mt-1 block font-mono text-[10px] font-normal text-slate-500">
+                              Declared location: {shop.address.coordinates.latitude.toFixed(5)}, {shop.address.coordinates.longitude.toFixed(5)}
+                            </span>
+                          )}
                         </dd>
+                      </div>
+                      <div>
+                        <dt className="text-slate-500">Application ID</dt>
+                        <dd className="mt-0.5 break-all font-mono font-semibold text-slate-900">{shop.id}</dd>
                       </div>
                       <div>
                         <dt className="text-slate-500">GSTIN</dt>
@@ -320,10 +495,76 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       <div>
                         <dt className="text-slate-500">Applied</dt>
                         <dd className="mt-0.5 font-semibold text-slate-900">
-                          {new Date(shop.createdAt).toLocaleDateString('en-IN')}
+                          {new Date(verificationApplications[shop.id]?.submittedAt || shop.createdAt).toLocaleString('en-IN')}
                         </dd>
                       </div>
                     </dl>
+                    {verificationApplications[shop.id]?.requestMessage && (
+                      <p className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-amber-900">
+                        Applicant needs to respond to: {verificationApplications[shop.id]?.requestMessage}
+                      </p>
+                    )}
+                    {verificationApplications[shop.id] ? (
+                      <div className="space-y-2 border-t border-slate-100 pt-3">
+                        <p className="font-semibold text-slate-800">
+                          Application status: {verificationApplications[shop.id]?.status.replaceAll('_', ' ')}
+                        </p>
+                        <p className="text-[11px] text-slate-500">
+                          Inspect all three photographs and each submitted document before approving.
+                        </p>
+                        <div>
+                          <p className="mb-1 font-semibold text-slate-700">Shop photographs</p>
+                          <div className="grid grid-cols-3 gap-2">
+                            {([
+                              ['exterior', 'Exterior'],
+                              ['interior', 'Interior'],
+                              ['shopkeeper', 'Shopkeeper at shop'],
+                            ] as const).map(([kind, label]) => {
+                              const file = verificationApplications[shop.id]?.photos?.[kind];
+                              return file ? (
+                                <button
+                                  key={kind}
+                                  type="button"
+                                  onClick={() => void openVerificationFile(file, label)}
+                                  className="rounded-lg border border-slate-200 p-2 text-left hover:border-blue-400"
+                                >
+                                  <span className="block truncate font-semibold text-blue-700">{label}</span>
+                                  <span className="block truncate text-[10px] text-slate-500">{file.name}</span>
+                                </button>
+                              ) : (
+                                <span key={kind} className="rounded-lg border border-rose-200 bg-rose-50 p-2 text-rose-700">{label}: missing</span>
+                              );
+                            })}
+                          </div>
+                        </div>
+                        {[
+                          ...(verificationApplications[shop.id]?.businessDocument
+                            ? [verificationApplications[shop.id]!.businessDocument!]
+                            : []),
+                          ...(verificationApplications[shop.id]?.additionalDocuments || []),
+                        ].map((file, index) => (
+                          <div key={file.path} className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 p-2">
+                            <div className="min-w-0">
+                              <p className="font-semibold text-slate-700">
+                                {index === 0 ? 'Business document' : `Additional document ${index}`}: {file.type.replaceAll('_', ' ')}
+                              </p>
+                              <p className="truncate text-[10px] text-slate-500">{file.name}</p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => void openVerificationFile(file, index === 0 ? 'Business document' : `Additional document ${index}`)}
+                              className="shrink-0 rounded-md bg-blue-50 px-2.5 py-1.5 font-semibold text-blue-700"
+                            >
+                              Inspect
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="rounded-lg border border-rose-200 bg-rose-50 p-2 text-rose-800">
+                        Required private application files have not been submitted. Do not approve this shop.
+                      </p>
+                    )}
                     {shop.description && (
                       <div className="border-t border-slate-100 pt-3">
                         <p className="text-slate-500">Store description</p>
@@ -335,7 +576,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   <div className="flex flex-col-reverse gap-2 border-t border-slate-100 bg-slate-50 p-4 sm:flex-row sm:justify-end">
                     <button
                       type="button"
-                      disabled={processingShopId === shop.id}
+                      disabled={processingShopId === shop.id || !verificationApplications[shop.id]}
+                      onClick={() => processShopApplication(shop.id, 'additional_information_required')}
+                      className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-amber-200 bg-white px-4 py-2 text-xs font-bold text-amber-800 transition-colors hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      Request more information
+                    </button>
+                    <button
+                      type="button"
+                      disabled={processingShopId === shop.id || !verificationApplications[shop.id]}
                       onClick={() => processShopApplication(shop.id, 'rejected')}
                       className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-rose-200 bg-white px-4 py-2 text-xs font-bold text-rose-700 transition-colors hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
                     >
@@ -344,8 +593,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </button>
                     <button
                       type="button"
-                      disabled={processingShopId === shop.id}
-                      onClick={() => processShopApplication(shop.id, 'verified')}
+                      disabled={processingShopId === shop.id || !verificationApplications[shop.id] ||
+                        ![
+                          verificationApplications[shop.id]?.photos?.exterior,
+                          verificationApplications[shop.id]?.photos?.interior,
+                          verificationApplications[shop.id]?.photos?.shopkeeper,
+                          verificationApplications[shop.id]?.businessDocument,
+                          ...(verificationApplications[shop.id]?.additionalDocuments || []),
+                        ].every((file) => Boolean(file &&
+                          reviewedVerificationPaths[`${file.path}:${file.sha256 || file.size}`]?.length))}
+                      onClick={() => processShopApplication(shop.id, 'approved')}
                       className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       <CheckCircle2 className="h-4 w-4" />
@@ -379,6 +636,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <th className="py-3 px-4">Locality</th>
                     <th className="py-3 px-4">License / GSTIN</th>
                     <th className="py-3 px-4">Status</th>
+                    <th className="py-3 px-4 min-w-[320px]">GST registration review</th>
                     <th className="py-3 px-4 text-right">Actions</th>
                   </tr>
                 </thead>
@@ -410,6 +668,65 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           {shop.verificationStatus.toUpperCase()}
                         </span>
                       </td>
+                      <td className="py-3 px-4 min-w-[320px]">
+                        {(() => {
+                          const draft = gstDrafts[shop.id];
+                          if (!draft) return <span className="text-slate-500">Loading private GST record…</span>;
+                          return (
+                            <div className="space-y-2">
+                              {draft.requestedScheme && (
+                                <p className="rounded-md bg-blue-50 px-2 py-1.5 text-[11px] text-blue-800">
+                                  Shopkeeper requested: <strong>{draft.requestedScheme === 'composition' ? 'Composition scheme' : 'Regular scheme'}</strong>. Verify the submitted GSTIN before approving.
+                                </p>
+                              )}
+                              <select
+                                value={draft.status}
+                                onChange={(event) => setGstDrafts((current) => ({
+                                  ...current,
+                                  [shop.id]: { ...draft, status: event.target.value as GstRegistrationStatus },
+                                }))}
+                                className="w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-[11px]"
+                              >
+                                {([
+                                  ['pending_verification', 'Pending verification'],
+                                  ['unregistered', 'Verified unregistered'],
+                                  ['regular', 'Verified regular scheme'],
+                                  ['composition', 'Verified composition scheme'],
+                                  ['suspended', 'Suspended'],
+                                ] as const).map(([value, label]) => (
+                                  <option key={value} value={value}>{label}</option>
+                                ))}
+                              </select>
+                              <input
+                                value={draft.gstin}
+                                onChange={(event) => setGstDrafts((current) => ({
+                                  ...current,
+                                  [shop.id]: { ...draft, gstin: event.target.value.toUpperCase() },
+                                }))}
+                                placeholder="GSTIN (required for registered schemes)"
+                                className="w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-[11px] font-mono"
+                              />
+                              <input
+                                value={draft.reason}
+                                onChange={(event) => setGstDrafts((current) => ({
+                                  ...current,
+                                  [shop.id]: { ...draft, reason: event.target.value },
+                                }))}
+                                placeholder="Verification decision and reason (required)"
+                                className="w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-[11px]"
+                              />
+                              <button
+                                type="button"
+                                disabled={!draft.reason.trim() || processingGstShopId === shop.id}
+                                onClick={() => void handleShopGstRegistrationChange(shop.id)}
+                                className="rounded-md bg-blue-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                {processingGstShopId === shop.id ? 'Saving…' : 'Save GST verification'}
+                              </button>
+                            </div>
+                          );
+                        })()}
+                      </td>
                       <td className="py-3 px-4 text-right">
                         {shop.verificationStatus !== 'verified' ? (
                           <button
@@ -420,7 +737,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           </button>
                         ) : (
                           <button
-                            onClick={() => handleShopStatusChange(shop.id, 'suspended', 'Suspended for inspection')}
+                            onClick={() => void suspendShop(shop)}
                             className="px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-md transition-colors cursor-pointer"
                           >
                             Suspend
@@ -825,6 +1142,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           order={selectedInvoiceOrder}
           onClose={() => setSelectedInvoiceOrder(null)}
         />
+      )}
+
+      {isLoadingVerificationFile && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 text-sm font-semibold text-white">
+          Opening private verification file…
+        </div>
+      )}
+      {verificationFilePreview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 p-4">
+          <div className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 p-3">
+              <h3 className="font-bold text-slate-900">{verificationFilePreview.label}</h3>
+              <button
+                type="button"
+                onClick={() => setVerificationFilePreview(null)}
+                className="rounded-lg px-3 py-1.5 text-sm font-semibold text-slate-700 hover:bg-slate-100"
+              >
+                Close
+              </button>
+            </div>
+            {verificationFilePreview.contentType.startsWith('image/') ? (
+              <img src={verificationFilePreview.url} alt={verificationFilePreview.label} className="max-h-[82vh] w-full bg-slate-100 object-contain" />
+            ) : (
+              <iframe title={verificationFilePreview.label} src={verificationFilePreview.url} className="h-[82vh] w-full" />
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

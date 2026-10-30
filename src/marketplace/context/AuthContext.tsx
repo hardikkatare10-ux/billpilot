@@ -8,6 +8,11 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { Shop, User, UserAddress, UserRole } from '../types';
 import { dbStore } from '../services/db/store';
 import { useUnifiedAuth, UnifiedUser } from '../../context/UnifiedAuthContext';
+import {
+  submitShopVerificationApplication,
+  type ShopVerificationFiles,
+  type ShopVerificationUploadProgress,
+} from '../services/firebase/shopVerification';
 
 interface AuthContextType {
   currentUser: User | null;
@@ -48,6 +53,8 @@ interface AuthContextType {
     gstin?: string;
     fssaiLicense?: string;
     tradeLicenseNo?: string;
+    verificationFiles: ShopVerificationFiles;
+    onUploadProgress: (progress: ShopVerificationUploadProgress) => void;
   }) => Promise<{ user: User; shop: Shop }>;
   registerAdmin: (input: { name: string; email: string; phone: string }) => User;
   logout: () => void;
@@ -155,36 +162,52 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     locality: string;
     city: string;
     serviceablePincodes: string[];
+    coordinates: { latitude: number; longitude: number };
     serviceRadiusKm?: number;
     baseDeliveryChargeRupees?: number;
     minOrderValueRupees?: number;
     gstin?: string;
     fssaiLicense?: string;
     tradeLicenseNo?: string;
+    verificationFiles: ShopVerificationFiles;
+    onUploadProgress: (progress: ShopVerificationUploadProgress) => void;
   }): Promise<{ user: User; shop: Shop }> => {
-    const res = await unified.register({
-      name: input.ownerName,
-      email: input.email,
-      password: input.password || 'password123',
-      phone: input.phone,
-      role: 'shopkeeper',
-      shopDetails: {
-        shopName: input.shopName,
-        category: input.category,
-        description: input.description,
-        street: input.street,
-        locality: input.locality,
-        city: input.city,
-        pincode: input.serviceablePincodes[0] || '110001',
-        serviceablePincodes: input.serviceablePincodes,
-        coordinates: input.coordinates,
-        gstin: input.gstin,
-        tradeLicenseNo: input.tradeLicenseNo,
-      },
-    });
-
+    let res = unified.currentUser;
+    if (res?.requestedRole === 'shopkeeper' && res.email.toLowerCase() !== input.email.trim().toLowerCase()) {
+      throw new Error('Sign out of the current account before registering a different shopkeeper.');
+    }
+    if (!(res?.requestedRole === 'shopkeeper' && res.shopId && res.shopkeeperStatus === 'pending')) {
+      res = await unified.register({
+        name: input.ownerName,
+        email: input.email,
+        password: input.password || 'password123',
+        phone: input.phone,
+        role: 'shopkeeper',
+        shopDetails: {
+          shopName: input.shopName,
+          category: input.category,
+          description: input.description,
+          street: input.street,
+          locality: input.locality,
+          city: input.city,
+          pincode: input.serviceablePincodes[0] || '110001',
+          serviceablePincodes: input.serviceablePincodes,
+          coordinates: input.coordinates,
+          gstin: input.gstin,
+          tradeLicenseNo: input.tradeLicenseNo,
+        },
+      });
+    }
+    if (!res.shopId) throw new Error('The shop application was created without a shop ID. Contact support.');
+    let shop = dbStore.getShopById(res.shopId);
+    if (!shop) throw new Error('Shop details are not available yet. Refresh and try again.');
+    await submitShopVerificationApplication(
+      shop.id,
+      res.id,
+      input.verificationFiles,
+      input.onUploadProgress
+    );
     setIsAuthModalOpen(false);
-    const shop = res.shopId ? dbStore.getShopById(res.shopId) || ({} as Shop) : ({} as Shop);
     return {
       user: mapUnifiedUser(res)!,
       shop,
