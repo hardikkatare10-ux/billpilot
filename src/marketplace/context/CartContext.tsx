@@ -7,6 +7,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { CartItem, MinorUnits, Shop } from '../types';
 import { dbStore } from '../services/db/store';
+import { subscribeToShopProducts } from '../services/firebase/productService';
 
 interface PendingShopSwitch {
   newShopId: string;
@@ -92,41 +93,37 @@ export const CartProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     if (!shopId) return;
 
-    // Dynamically import to avoid circular dependency
-    let unsubscribe = () => {};
-    import('../services/firebase/productService').then(({ subscribeToShopProducts }) => {
-      unsubscribe = subscribeToShopProducts(shopId, (freshListings) => {
-        setItems((prevItems) => {
-          let hasChanges = false;
-          const updated = prevItems.map((cartItem) => {
-            const fresh = freshListings.find((l) => l.id === cartItem.listingId);
-            if (fresh) {
-              const effectivePrice =
-                fresh.salePrice && fresh.salePrice > 0 ? fresh.salePrice : fresh.shopPrice;
-              const isOutOfStock = !fresh.isAvailable || fresh.stockQuantity <= 0;
+    const unsubscribe = subscribeToShopProducts(shopId, (freshListings) => {
+      setItems((prevItems) => {
+        let hasChanges = false;
+        const updated = prevItems.map((cartItem) => {
+          const fresh = freshListings.find((l) => l.id === cartItem.listingId);
+          if (fresh) {
+            const effectivePrice =
+              fresh.salePrice && fresh.salePrice > 0 ? fresh.salePrice : fresh.shopPrice;
+            const isOutOfStock = !fresh.isAvailable || fresh.stockQuantity <= 0;
 
-              if (
-                cartItem.unitPrice !== effectivePrice ||
-                cartItem.productName !== fresh.product.name ||
-                cartItem.imageUrl !== fresh.product.imageUrl ||
-                cartItem.isOutOfStock !== isOutOfStock ||
-                cartItem.availableStock !== fresh.stockQuantity
-              ) {
-                hasChanges = true;
-                return {
-                  ...cartItem,
-                  unitPrice: effectivePrice,
-                  productName: fresh.product.name,
-                  imageUrl: fresh.product.imageUrl,
-                  isOutOfStock,
-                  availableStock: fresh.stockQuantity,
-                };
-              }
+            if (
+              cartItem.unitPrice !== effectivePrice ||
+              cartItem.productName !== fresh.product.name ||
+              cartItem.imageUrl !== fresh.product.imageUrl ||
+              cartItem.isOutOfStock !== isOutOfStock ||
+              cartItem.availableStock !== fresh.stockQuantity
+            ) {
+              hasChanges = true;
+              return {
+                ...cartItem,
+                unitPrice: effectivePrice,
+                productName: fresh.product.name,
+                imageUrl: fresh.product.imageUrl,
+                isOutOfStock,
+                availableStock: fresh.stockQuantity,
+              };
             }
-            return cartItem;
-          });
-          return hasChanges ? updated : prevItems;
+          }
+          return cartItem;
         });
+        return hasChanges ? updated : prevItems;
       });
     });
 
