@@ -3,6 +3,7 @@ import AuthScreen from "./auth";
 import { queuePush, wipeCloudData } from "../lib/cloudSync";
 import dukanYantraLogo from "../icon.png";
 import { connectPosDevice, discoverPosDevices, type PosDeviceInfo } from "./posDeviceIntegration";
+import { CameraScanButton, CameraScannerModal, FirstRunSetup, useDeviceType, useHardwareScanner } from "./deviceAndScan";
 import {
   LayoutDashboard, ShoppingCart, Package, FileText, QrCode,
   Building2, Users, Settings, User, Plus, Search, Bell,
@@ -21,12 +22,36 @@ import {
 } from "recharts";
 import { ShopDashboard } from "../marketplace/components/shopkeeper/ShopDashboard";
 import { ShopInventory } from "../marketplace/components/shopkeeper/ShopInventory";
+import { InvoiceModal } from "../marketplace/components/common/InvoiceModal";
 import { InventoryImport } from "./InventoryImport";
 import type { ImportedProduct } from "./inventoryImportParser";
 import { persistImportedInventory } from "./inventoryImportPersistence";
 import { dbStore } from "../marketplace/services/db/store";
 import { createFirestoreProduct } from "../marketplace/services/firebase/productService";
 import type { Shop as LocalShop, Order as LocalOrder, ShopListing as LocalListing } from "../marketplace/types";
+import {
+  assertInvoiceTypeAllowed,
+  getAllowedInvoiceTypes,
+  getInvoiceDocumentLabel,
+  isValidGstin,
+  type GstRegistrationStatus,
+  type InvoiceKind,
+  type VerifiedGstRegistration,
+} from "./invoiceRules";
+import {
+  loadShopGstRegistration,
+  submitShopGstRegistration,
+  subscribeToShopGstRegistration,
+} from "./gstRegistrationService";
+import {
+  subscribeToShopMarketplaceRecords,
+  type MarketplaceCustomerRecord,
+  type MarketplaceInvoiceDocument,
+} from "../marketplace/services/firebase/shopMarketplaceRecords";
+import {
+  getCustomerShopOrderPage,
+  type CustomerShopOrderCursor,
+} from "../marketplace/services/firebase/orderService";
 
 const env = (import.meta as any).env as { VITE_API_BASE?: string; DEV?: boolean };
 const API_BASE = env.VITE_API_BASE || "/api";
@@ -70,10 +95,12 @@ interface UserAccount {
 }
 type UserRole = "admin" | "manager" | "billing_staff" | "inventory_staff" | "readonly";
 interface AuthSessionUser {
+  id?: string;
   username: string;
   shopName: string;
   phone: string;
   email?: string;
+  shopId?: string;
 }
 interface PartyRate {
   id: string; customerId: number; productId: number;
@@ -96,18 +123,27 @@ interface InvoiceRecord {
   status?: "paid" | "partial" | "unpaid";
   due?: number;
   saleType?: "normal" | "cash";
-  invoiceKind?: "tax" | "regular";
+  invoiceKind?: InvoiceKind;
+  supplierGstin?: string;
+  registrationGstinSnapshot?: string;
+  gstRegistrationStatus?: GstRegistrationStatus;
   customerId?: number; paymentMethod?: string; outstanding?: number; items?: InvoiceItem[];
   subtotal?: number; totalGst?: number;
   customerPhone?: string; customerEmail?: string; customerAddress?: string; customerGst?: string;
   paidAmount?: number; invoiceTemplate?: string;
-  source?: "invoice" | "pos";
+  source?: "invoice" | "pos" | "marketplace";
   discountAmount?: number; roundOff?: number;
   paymentMode?: "cash" | "upi" | "card" | "posdevice" | "mixed";
   paymentSplits?: { mode: string; amount: number }[];
   amountReceived?: number; changeReturned?: number;
   txnRef?: string; posProvider?: PaymentProvider; posTxnId?: string; posStatus?: "pending" | "success" | "failed";
   costTotal?: number;
+  marketplaceOrderId?: string;
+  customerAccountId?: string;
+  shopId?: string;
+  deliveryCharge?: number;
+  platformFee?: number;
+  invoiceNumber?: string;
 }
 interface POSLineItem {
   rowId: string; barcode: string; itemCode: string; name: string; productId: number;
@@ -117,6 +153,53 @@ interface HeldInvoice {
   id: string; savedAt: string; items: POSLineItem[]; customerName: string; date: string;
 }
 type PaymentProvider = "bharatpe" | "phonepe" | "paytm" | "amazonpay" | "gpay" | "other";
+
+function toMarketplaceInvoiceRecord(record: MarketplaceInvoiceDocument): InvoiceRecord {
+  const isTaxInvoice = record.documentType === "tax";
+  const subtotal = record.subtotal / 100;
+  const totalGst = isTaxInvoice ? record.gstTotal / 100 : 0;
+  const total = record.grandTotal / 100;
+  const paymentStatus = record.paymentStatus === "completed" ? "paid" : "unpaid";
+  return {
+    id: record.invoiceNumber,
+    invoiceNumber: record.invoiceNumber,
+    date: record.issuedAt.slice(0, 10),
+    customerName: record.customerName || "Marketplace customer",
+    customerPhone: record.customerPhone,
+    customerEmail: record.customerEmail,
+    customerAddress: record.customerAddress
+      ? [record.customerAddress.streetAddress, record.customerAddress.locality, record.customerAddress.city, record.customerAddress.pincode]
+          .filter(Boolean).join(", ")
+      : undefined,
+    customerAccountId: record.customerId,
+    total,
+    subtotal: isTaxInvoice ? Math.max(0, subtotal - totalGst) : subtotal,
+    totalGst,
+    deliveryCharge: record.deliveryCharge / 100,
+    platformFee: record.platformFee / 100,
+    itemCount: record.items.reduce((sum, item) => sum + item.quantity, 0),
+    status: paymentStatus,
+    due: paymentStatus === "paid" ? 0 : total,
+    paidAmount: paymentStatus === "paid" ? total : 0,
+    invoiceKind: record.documentType,
+    supplierGstin: record.supplierGstin,
+    registrationGstinSnapshot: record.registrationGstinSnapshot,
+    gstRegistrationStatus: record.gstRegistrationStatus as GstRegistrationStatus | undefined,
+    marketplaceOrderId: record.orderId,
+    shopId: record.shopId,
+    source: "marketplace",
+    paymentMethod: record.paymentMethod,
+    items: record.items.map((item) => ({
+      productId: 0,
+      name: item.productName,
+      qty: item.quantity,
+      price: isTaxInvoice
+        ? Math.max(0, item.subtotal - item.gstAmount) / 100 / Math.max(1, item.quantity)
+        : item.unitPrice / 100,
+      gstRate: item.gstRate,
+    })),
+  };
+}
 interface PaymentDevice {
   id: string; provider: PaymentProvider; label: string;
   connected: boolean; deviceName: string; deviceId: string; lastSync: string;
@@ -513,8 +596,9 @@ function AccountAccessScreen({ accounts, onRegister, onActivate, accountEmail, a
 }
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
-function DashboardView({ products, customers, demands, invoices, nextInvoiceLabel, reminders, onNavigate }: {
+function DashboardView({ products, customers, demands, invoices, nextInvoiceLabel, reminders, onNavigate, marketplaceOrders }: {
   products: Product[]; customers: Customer[]; demands: DemandOrder[]; invoices: InvoiceRecord[]; nextInvoiceLabel: string;
+  marketplaceOrders: LocalOrder[];
   reminders: Reminder[]; onNavigate?: (tab: Tab) => void;
 }) {
   const totalRevenue = invoices.reduce((s, i) => s + i.total, 0);
@@ -522,6 +606,9 @@ function DashboardView({ products, customers, demands, invoices, nextInvoiceLabe
   const monthRevenue = invoices.filter((i) => i.date.startsWith(thisMonth)).reduce((s, i) => s + i.total, 0);
   const lowStock = products.filter((p) => p.stock <= 10).length;
   const pendingCount = demands.filter((d) => d.status === "pending").length;
+  const marketplaceCollected = marketplaceOrders
+    .filter((order) => order.status === "delivered" && order.paymentStatus === "completed")
+    .reduce((sum, order) => sum + order.totalAmount / 100, 0);
 
   const todayStr = new Date().toISOString().split("T")[0];
   const pendingReminders = reminders.filter((r) => r.status === "pending");
@@ -557,6 +644,21 @@ function DashboardView({ products, customers, demands, invoices, nextInvoiceLabe
           </div>
         ))}
       </div>
+
+      <section className="grid grid-cols-1 sm:grid-cols-2 gap-4" aria-label="NearBasket marketplace totals">
+        <div className="bg-card rounded-xl p-4 border border-border shadow-sm">
+          <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Marketplace Orders</p>
+          <p className="text-2xl font-semibold font-[DM_Mono] text-foreground mt-2">{marketplaceOrders.length}</p>
+          <button onClick={() => onNavigate?.("local_orders")} className="text-xs text-primary font-semibold mt-1 hover:underline">
+            Open marketplace order history
+          </button>
+        </div>
+        <div className="bg-card rounded-xl p-4 border border-border shadow-sm">
+          <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Paid Marketplace Sales</p>
+          <p className="text-2xl font-semibold font-[DM_Mono] text-foreground mt-2">{fmt(marketplaceCollected)}</p>
+          <p className="text-xs text-muted-foreground mt-1">Delivered and payment-completed orders only; shown separately from manual invoices.</p>
+        </div>
+      </section>
 
       {lowStock > 0 && (
         <div className="flex items-center gap-3 p-3.5 bg-amber-50 border border-amber-200 rounded-xl text-amber-700 text-sm">
@@ -875,8 +977,11 @@ function InventoryView({ products, setProducts, businessCategory, storageKey }: 
             {[["Product Name *", "name", "text"], ["SKU Code", "sku", "text"], ["Barcode", "barcode", "text"], ["Selling Price (₹) *", "price", "number"], ["Cost Price (₹)", "costPrice", "number"], ["Stock Quantity *", "stock", "number"]].map(([label, key, type]) => (
               <div key={key as string}>
                 <label className="block text-xs font-medium text-muted-foreground mb-1">{label as string}</label>
-                <input type={type as string} value={(form as any)[key as string]} onChange={(e) => setForm((f) => ({ ...f, [key as string]: e.target.value }))}
-                  className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                <div className="flex gap-2">
+                  <input type={type as string} value={(form as any)[key as string]} onChange={(e) => setForm((f) => ({ ...f, [key as string]: e.target.value }))}
+                  className="w-full min-w-0 px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                  {key === "barcode" && <CameraScanButton label="" title="Scan product barcode" onDetected={(code) => setForm((f) => ({ ...f, barcode: code }))} />}
+                </div>
               </div>
             ))}
             <div>
@@ -934,14 +1039,18 @@ function InventoryView({ products, setProducts, businessCategory, storageKey }: 
 }
 
 // ─── Invoice Generator ────────────────────────────────────────────────────────
-function InvoiceView({ products, customers, profile, settings, onSave, onNavigate, nextInvoiceLabel, editInvoice, onDoneEditing, partyRates }: {
+function InvoiceView({ products, customers, profile, settings, onSave, onNavigate, nextInvoiceLabel, editInvoice, onDoneEditing, partyRates, gstRegistration, gstRegistrationLoading, shopId, shopOwnerUid }: {
   products: Product[]; customers: Customer[]; profile: Profile; settings: AppSettings;
-  onSave: (inv: InvoiceRecord) => void;
+  onSave: (inv: InvoiceRecord) => Promise<boolean> | boolean;
   onNavigate: (tab: Tab) => void;
   nextInvoiceLabel: string;
   editInvoice?: InvoiceRecord | null;
   onDoneEditing?: () => void;
   partyRates: PartyRate[];
+  gstRegistration: VerifiedGstRegistration | null;
+  gstRegistrationLoading: boolean;
+  shopId?: string;
+  shopOwnerUid?: string;
 }) {
   const isEditMode = !!editInvoice;
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(() => {
@@ -959,9 +1068,29 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
   const [scanMessage, setScanMessage] = useState("");
   const [showPreview, setShowPreview] = useState(false);
   const [saleType, setSaleType] = useState<"normal" | "cash">(editInvoice?.saleType || "normal");
-  const [invoiceKind, setInvoiceKind] = useState<"tax" | "regular">(editInvoice?.invoiceKind || "tax");
+  const allowedInvoiceTypes = getAllowedInvoiceTypes(gstRegistration);
+  const [invoiceKind, setInvoiceKind] = useState<InvoiceKind>(
+    editInvoice?.invoiceKind && allowedInvoiceTypes.includes(editInvoice.invoiceKind)
+      ? editInvoice.invoiceKind
+      : allowedInvoiceTypes[0] || "regular"
+  );
   const [invoiceTemplate, setInvoiceTemplate] = useState<InvoiceTemplate>((editInvoice?.invoiceTemplate as InvoiceTemplate) || "modern");
+  const [invoiceError, setInvoiceError] = useState("");
   const invoiceNo = editInvoice?.id || nextInvoiceLabel;
+
+  useEffect(() => {
+    if (!allowedInvoiceTypes.includes(invoiceKind)) {
+      setInvoiceKind(allowedInvoiceTypes[0] || "regular");
+    }
+  }, [gstRegistration, invoiceKind, allowedInvoiceTypes]);
+
+  const validateInvoiceType = async () => {
+    const registration = shopId && shopOwnerUid
+      ? await loadShopGstRegistration(shopId, shopOwnerUid)
+      : null;
+    assertInvoiceTypeAllowed(registration, invoiceKind);
+    return registration;
+  };
 
   // Re-apply party-specific pricing whenever the selected customer changes (not in edit mode, to avoid overwriting historical prices)
   useEffect(() => {
@@ -1025,9 +1154,23 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
     setScanCode("");
   };
 
-  const saveInvoice = () => {
-    if (saved) return;
-    onSave({
+  // Hardware barcode scanner (USB/Bluetooth) works even when no field is focused
+  useHardwareScanner(handleScanCode);
+
+  const saveInvoice = async (validatedRegistration?: VerifiedGstRegistration | null): Promise<boolean> => {
+    if (saved) return false;
+    let currentRegistration: VerifiedGstRegistration | null;
+    try {
+      currentRegistration = validatedRegistration === undefined
+        ? await validateInvoiceType()
+        : validatedRegistration;
+      assertInvoiceTypeAllowed(currentRegistration, invoiceKind);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not validate shop GST registration.';
+      setInvoiceError(message);
+      return false;
+    }
+    const saveResult = await onSave({
       id: invoiceNo,
       date: editInvoice?.date || new Date().toISOString().split("T")[0],
       customerName: selectedCustomer?.name || "Walk-in",
@@ -1038,27 +1181,33 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
       customerGst: selectedCustomer?.gst || "",
       total: grandTotal,
       subtotal,
-      totalGst,
+      totalGst: invoiceKind === "tax" ? totalGst : 0,
       itemCount: items.length,
       status: paymentStatus,
       due: dueAmount,
       paidAmount: paymentStatus === "paid" ? grandTotal : paymentStatus === "partial" ? paidAmount : 0,
       saleType,
       invoiceKind,
+      ...(currentRegistration?.status === "regular" && currentRegistration.verified && isValidGstin(currentRegistration.gstin)
+        ? { supplierGstin: currentRegistration.gstin, gstRegistrationStatus: currentRegistration.status }
+        : {}),
       invoiceTemplate,
       items: items,
     });
+    if (saveResult === false) return false;
     setSaved(true);
     if (isEditMode) {
       setTimeout(() => onDoneEditing?.(), 600);
     }
+    return true;
   };
 
   const invoiceSizeMap = { a4: { w: "210mm", h: "297mm", px: 210 * 3.7795275591 }, a5: { w: "148mm", h: "210mm", px: 148 * 3.7795275591 }, thermal: { w: "80mm", h: "auto", px: 80 * 3.7795275591 } };
 
-  const createLegacyInvoiceHtml = () => {
+  const createLegacyInvoiceHtml = (registration: VerifiedGstRegistration | null = gstRegistration) => {
     const pageSize = invoiceSizeMap[invoiceSize];
     const pdfFontSize = invoiceSize === "thermal" ? 10 : 12;
+    const documentLabel = getInvoiceDocumentLabel(invoiceKind, registration);
     return `<html><head><title>${invoiceNo}</title><style>
       @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Mono&display=swap');
       @page{size: ${pageSize.w} ${pageSize.h}; margin:10mm}
@@ -1092,7 +1241,7 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
       .footer .brand{font-size:10px;font-weight:700;text-transform:uppercase;line-height:1.2;text-align:right}
       .small-text{font-size:10px;color:#64748b}
     </style></head><body><div class="inv">
-      <div class="top-heading"><h1>${invoiceKind === "tax" ? "Tax Invoice" : "Invoice"}</h1></div>
+      <div class="top-heading"><h1>${documentLabel}</h1></div>
       <div class="grid">
         <div class="invoice-to">
           <div class="label">Invoice To</div>
@@ -1104,7 +1253,7 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
         <div class="company">
           <div class="name">${profile.shopName}</div>
           <div class="meta">${profile.address || ""}${profile.phone ? `<br/>📞 ${profile.phone}` : ""}</div>
-          ${invoiceKind === "tax" ? `<div class="meta">GST: ${profile.gst ? profile.gst : 'N/A'}</div>` : ""}
+          ${invoiceKind === "tax" ? `<div class="meta">GSTIN: ${registration?.gstin || ""}</div>` : ""}
           <div class="company-meta">
             <span>${saleType === "cash" ? "Cash Sale" : "Normal Sale"}</span>
             <span>Invoice No: ${invoiceNo}</span>
@@ -1127,10 +1276,13 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
     </div></body></html>`;
   };
 
-  const createInvoiceHtml = () => {
+  const createInvoiceHtml = (registration: VerifiedGstRegistration | null = gstRegistration) => {
     const pageSize = invoiceSizeMap[invoiceSize];
     const isThermal = invoiceSize === "thermal";
-    const title = invoiceKind === "tax" ? "Tax Invoice" : "Invoice";
+    const title = getInvoiceDocumentLabel(invoiceKind, registration);
+    const verifiedSupplierGstin = registration?.status === "regular" && registration.verified && isValidGstin(registration.gstin)
+      ? registration.gstin
+      : "";
     const invoiceDate = new Date().toLocaleDateString("en-IN");
     const esc = (value: string | number | undefined | null) =>
       String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch] || ch));
@@ -1217,7 +1369,7 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
             ${profile.address ? `<p>${esc(profile.address)}</p>` : ""}
             ${profile.phone ? `<p>Phone: ${esc(profile.phone)}</p>` : ""}
             ${profile.email ? `<p>Email: ${esc(profile.email)}</p>` : ""}
-            ${invoiceKind === "tax" ? `<p class="mono">GSTIN: ${esc(profile.gst || "N/A")}</p>` : ""}
+            ${invoiceKind === "tax" ? `<p class="mono">GSTIN: ${esc(verifiedSupplierGstin)}</p>` : ""}
             ${profile.pan ? `<p class="mono">PAN: ${esc(profile.pan)}</p>` : ""}</div></div>
           </section>
           <section class="meta-card">
@@ -1241,7 +1393,7 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
             <div class="eyebrow">Payment</div>
             <h2>${esc(statusLabel)}</h2>
             <p>Subtotal: ${esc(fmt(subtotal))}</p>
-            ${invoiceKind === "tax" ? `<p>GST: ${esc(fmt(totalGst))}</p>` : ""}
+            ${invoiceKind === "tax" ? `<p>GST collected: ${esc(fmt(totalGst))}</p>` : ""}
             <p>Due: ${esc(fmt(dueAmount))}</p>
           </section>
         </div>
@@ -1253,6 +1405,8 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
           <section class="note-card">
             <h3>Terms & Notes</h3>
             <p>${esc(terms)}</p>
+            ${invoiceKind === "bill_of_supply" ? `<p>Composition taxable person, not eligible to collect tax on supplies.</p>` : ""}
+            ${invoiceKind === "regular" ? `<p>This document is not a GST tax invoice. Any GST registration or tax liability must be assessed separately.</p>` : ""}
           </section>
           <section class="totals">
             <div class="total-row"><span>Subtotal</span><strong>${esc(fmt(subtotal))}</strong></div>
@@ -1302,10 +1456,17 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
     });
 
     const printPdf = async () => {
+      let registration: VerifiedGstRegistration | null;
+      try {
+        registration = await validateInvoiceType();
+      } catch (error) {
+        setInvoiceError(error instanceof Error ? error.message : "GST registration could not be validated.");
+        return;
+      }
       try {
         await loadScript("https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js");
         await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
-        const html = createInvoiceHtml();
+        const html = createInvoiceHtml(registration);
         const { container, pageSize } = prepareInvoiceCanvasContainer(html);
         const html2canvas = (window as any).html2canvas;
         const { jsPDF } = (window as any).jspdf || (window as any).window?.jspdf || (window as any);
@@ -1328,17 +1489,17 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
           const a = document.createElement('a'); a.href = url; a.download = `${invoiceNo}.pdf`; document.body.appendChild(a); a.click(); a.remove();
         }
         document.body.removeChild(container);
-        saveInvoice();
+        await saveInvoice(registration);
       } catch (err) {
         console.error(err);
         // fallback to original HTML print
         const win = window.open("", "_blank");
         if (!win) return;
-        const html = createInvoiceHtml();
+        const html = createInvoiceHtml(registration);
         win.document.write(html);
         win.document.close();
         setTimeout(() => win.print(), 400);
-        saveInvoice();
+        await saveInvoice(registration);
       }
     };
 
@@ -1355,11 +1516,18 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
     });
 
     const makePdf = async () => {
+      let registration: VerifiedGstRegistration | null;
+      try {
+        registration = await validateInvoiceType();
+      } catch (error) {
+        setInvoiceError(error instanceof Error ? error.message : "GST registration could not be validated.");
+        return;
+      }
       try {
         await loadScript("https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js");
         await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
         // parse invoice HTML and get the .inv element
-        const html = createInvoiceHtml();
+        const html = createInvoiceHtml(registration);
         const { container, pageSize } = prepareInvoiceCanvasContainer(html);
 
         // use the global html2canvas and jspdf
@@ -1380,11 +1548,11 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
         pdf.save(`${invoiceNo}.pdf`);
 
         document.body.removeChild(container);
-        saveInvoice();
+        await saveInvoice(registration);
       } catch (err) {
         // Fallback to HTML download if PDF generation fails
         console.error(err);
-        const html = createInvoiceHtml();
+        const html = createInvoiceHtml(registration);
         const blob = new Blob([html], { type: "text/html" });
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
@@ -1394,7 +1562,7 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
         link.click();
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
-        saveInvoice();
+        await saveInvoice(registration);
       }
     };
 
@@ -1467,6 +1635,7 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
                       className="flex-1 px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
                     />
                     <button onClick={() => handleScanCode(scanCode)} className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors">Add</button>
+                    <CameraScanButton label="" title="Scan items with camera" keepOpen onDetected={handleScanCode} />
                   </div>
                   {scanMessage && <p className="mt-2 text-xs text-muted-foreground">{scanMessage}</p>}
                 </div>
@@ -1480,15 +1649,64 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
               <div className="grid grid-cols-1 gap-3 mt-4">
                 <div>
                   <label className="block text-xs font-medium text-muted-foreground mb-1">Invoice Type</label>
-                  {(["tax", "regular"] as const).map((kind) => (
-                    <label key={kind} className={`flex items-center gap-3 p-2.5 rounded-lg border cursor-pointer transition-all ${invoiceKind === kind ? "border-primary bg-primary/5" : "border-border hover:border-primary/30"}`}>
-                      <input type="radio" name="invoiceKind" value={kind} checked={invoiceKind === kind} onChange={() => setInvoiceKind(kind)} className="accent-primary" />
-                      <div>
-                        <p className="text-sm font-medium text-foreground">{kind === "tax" ? "Tax Invoice" : "Invoice"}</p>
-                        <p className="text-xs text-muted-foreground">{kind === "tax" ? "Show TAX INVOICE label" : "Show INVOICE label"}</p>
-                      </div>
-                    </label>
-                  ))}
+                  {gstRegistrationLoading && (
+                    <p className="mb-2 text-xs text-muted-foreground" role="status">Checking verified shop GST registration…</p>
+                  )}
+                  {gstRegistration?.status === "regular" && gstRegistration.verified && isValidGstin(gstRegistration.gstin) && (
+                    <div className="mb-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+                      GST TAX INVOICE: Select this option only if your shop has a valid GST registration number (GSTIN).
+                    </div>
+                  )}
+                  {gstRegistration?.status === "composition" && gstRegistration.verified && (
+                    <div className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      Composition scheme registration is verified. Use a Bill of Supply; GST cannot be separately collected as tax.
+                    </div>
+                  )}
+                  {(!gstRegistration || !gstRegistration.verified ||
+                    gstRegistration.status === "pending_verification" || gstRegistration.status === "suspended") && (
+                    <div className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      GST registration is not verified as active. GST tax invoices are unavailable. This does not determine whether GST registration is legally required.
+                    </div>
+                  )}
+                  {allowedInvoiceTypes.map((kind) => {
+                    const label = kind === "tax"
+                      ? "GST Tax Invoice"
+                      : kind === "bill_of_supply"
+                        ? "Bill of Supply"
+                        : gstRegistration?.status === "regular" && gstRegistration.verified
+                          ? "Commercial Receipt / Other permitted document"
+                          : "Non-GST Bill / Receipt";
+                    const description = kind === "tax"
+                      ? "Select this option when a GST tax invoice is applicable to your transaction."
+                      : kind === "bill_of_supply"
+                        ? "For supplies made under the verified composition scheme."
+                        : gstRegistration?.status === "regular" && gstRegistration.verified
+                          ? "For transactions where a tax invoice is not required; not a substitute for mandatory GST documentation."
+                          : "For shops that are not registered under GST.";
+                    return (
+                      <label key={kind} className={`flex items-center gap-3 p-2.5 rounded-lg border transition-all ${invoiceKind === kind ? "border-primary bg-primary/5" : "border-border hover:border-primary/30"} ${gstRegistrationLoading ? "opacity-60" : "cursor-pointer"}`}>
+                        <input
+                          type="radio"
+                          name="invoiceKind"
+                          value={kind}
+                          checked={invoiceKind === kind}
+                          disabled={gstRegistrationLoading}
+                          onChange={() => {
+                            setInvoiceError("");
+                            setInvoiceKind(kind);
+                          }}
+                          className="accent-primary"
+                        />
+                        <div>
+                          <p className="text-sm font-medium text-foreground">{label}</p>
+                          <p className="text-xs text-muted-foreground">{description}</p>
+                        </div>
+                      </label>
+                    );
+                  })}
+                  {invoiceError && (
+                    <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700" role="alert">{invoiceError}</p>
+                  )}
                 </div>
               </div>
             </div>
@@ -1497,12 +1715,12 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
           <div className="bg-card rounded-xl p-5 border border-border shadow-sm">
             <h3 className="font-semibold text-foreground mb-3">Items</h3>
             <div className="text-xs font-medium text-muted-foreground grid grid-cols-12 gap-2 mb-2 px-1">
-              <span className="col-span-4">Product</span><span className="col-span-2 text-center">Qty</span><span className="col-span-2">Rate</span><span className="col-span-2">GST</span><span className="col-span-1 text-right">Amt</span>
+              <span className={invoiceKind === "tax" ? "col-span-4" : "col-span-5"}>Product</span><span className="col-span-2 text-center">Qty</span><span className="col-span-2">Rate</span>{invoiceKind === "tax" && <span className="col-span-2">GST</span>}<span className={invoiceKind === "tax" ? "col-span-1 text-right" : "col-span-2 text-right"}>Amt</span>
             </div>
             <div className="space-y-2">
               {items.map((item, idx) => (
                 <div key={idx} className="grid grid-cols-12 gap-2 items-center">
-                  <div className="col-span-4">
+                  <div className={invoiceKind === "tax" ? "col-span-4" : "col-span-5"}>
                     {products.length > 0 ? (
                       <select value={item.productId} onChange={(e) => {
                         const p = products.find((p) => p.id === +e.target.value);
@@ -1520,11 +1738,13 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
                     className="col-span-2 px-2 py-1.5 bg-background border border-border rounded-lg text-xs text-center focus:outline-none focus:ring-2 focus:ring-primary/30" />
                   <input type="number" value={item.price} onChange={(e) => updateItem(idx, "price", +e.target.value)}
                     className="col-span-2 px-2 py-1.5 bg-background border border-border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/30" />
-                  <select value={item.gstRate} onChange={(e) => updateItem(idx, "gstRate", +e.target.value)}
-                    className="col-span-2 px-2 py-1.5 bg-background border border-border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/30">
-                    {[0, 5, 12, 18, 28].map((r) => <option key={r} value={r}>{r}%</option>)}
-                  </select>
-                  <span className="col-span-1 text-xs font-[DM_Mono] font-semibold text-right">{fmt(item.qty * item.price)}</span>
+                  {invoiceKind === "tax" && (
+                    <select value={item.gstRate} onChange={(e) => updateItem(idx, "gstRate", +e.target.value)}
+                      className="col-span-2 px-2 py-1.5 bg-background border border-border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/30">
+                      {[0, 5, 12, 18, 28].map((r) => <option key={r} value={r}>{r}%</option>)}
+                    </select>
+                  )}
+                  <span className={invoiceKind === "tax" ? "col-span-1 text-xs font-[DM_Mono] font-semibold text-right" : "col-span-2 text-xs font-[DM_Mono] font-semibold text-right"}>{fmt(item.qty * item.price)}</span>
                   <button onClick={() => removeItem(idx)} className="col-span-1 p-1 text-red-400 hover:text-red-600 transition-colors flex justify-end"><X className="w-3.5 h-3.5" /></button>
                 </div>
               ))}
@@ -1538,7 +1758,7 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
             <h3 className="font-semibold text-foreground mb-3">Summary</h3>
             <div className="space-y-2 text-sm">
               <div className="flex justify-between text-muted-foreground"><span>Subtotal</span><span className="font-[DM_Mono]">{fmt(subtotal)}</span></div>
-              <div className="flex justify-between text-muted-foreground"><span>GST</span><span className="font-[DM_Mono]">{fmt(totalGst)}</span></div>
+              {invoiceKind === "tax" && <div className="flex justify-between text-muted-foreground"><span>GST</span><span className="font-[DM_Mono]">{fmt(totalGst)}</span></div>}
               <div className="h-px bg-border my-2" />
               <div className="flex justify-between font-bold text-lg text-primary"><span>Total</span><span className="font-[DM_Mono]">{fmt(grandTotal)}</span></div>
             </div>
@@ -1593,7 +1813,7 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
 
       <div className="flex flex-col sm:flex-row gap-3">
         {isEditMode && (
-          <button onClick={saveInvoice} disabled={saved} className={`flex-1 inline-flex items-center justify-center gap-2 py-3 px-4 rounded-xl text-sm font-medium transition-colors shadow-sm ${saved ? "bg-emerald-500 text-white" : "bg-primary text-primary-foreground hover:bg-primary/90"}`}>
+          <button onClick={() => void saveInvoice()} disabled={saved} className={`flex-1 inline-flex items-center justify-center gap-2 py-3 px-4 rounded-xl text-sm font-medium transition-colors shadow-sm ${saved ? "bg-emerald-500 text-white" : "bg-primary text-primary-foreground hover:bg-primary/90"}`}>
             {saved ? <><Check className="w-4 h-4" /> Saved!</> : <><Check className="w-4 h-4" /> Save Changes</>}
           </button>
         )}
@@ -1618,12 +1838,13 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
 }
 
 // ─── Invoice Records ───────────────────────────────────────────────────────────
-function InvoicesView({ invoices, onDelete, onNavigateInvoice, onEditInvoice, profile }: {
+function InvoicesView({ invoices, onDelete, onNavigateInvoice, onEditInvoice, profile, marketplaceRecordsError }: {
   invoices: InvoiceRecord[];
   onDelete: (id: string) => void;
   onNavigateInvoice?: () => void;
   onEditInvoice?: (id: string) => void;
   profile: Profile;
+  marketplaceRecordsError?: string | null;
 }) {
   const [selectedInvoice, setSelectedInvoice] = useState<InvoiceRecord | null>(null);
   const [search, setSearch] = useState("");
@@ -1639,7 +1860,19 @@ function InvoicesView({ invoices, onDelete, onNavigateInvoice, onEditInvoice, pr
 
   const openBill = (invoice: InvoiceRecord) => {
     const tmpl = (invoice.invoiceTemplate || billTemplate) as string;
-    const iKind = invoice.invoiceKind || "tax";
+    const iKind: InvoiceKind = invoice.invoiceKind === "tax" &&
+      invoice.gstRegistrationStatus === "regular" &&
+      isValidGstin(invoice.supplierGstin)
+      ? "tax"
+      : invoice.invoiceKind === "bill_of_supply"
+        ? "bill_of_supply"
+        : "regular";
+    const storedRegistration = {
+      status: invoice.gstRegistrationStatus || "unregistered",
+      verified: invoice.gstRegistrationStatus === "regular" && isValidGstin(invoice.supplierGstin),
+      gstin: invoice.supplierGstin || invoice.registrationGstinSnapshot,
+    };
+    const documentLabel = getInvoiceDocumentLabel(iKind, storedRegistration);
     const esc = (v: string|number|undefined|null) =>
       String(v??"").replace(/[&<>"']/g,(ch:string)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":'&#39;'}[ch]||ch));
     const fmtN = (n: number) => new Intl.NumberFormat("en-IN",{style:"currency",currency:"INR",maximumFractionDigits:2}).format(n);
@@ -1648,10 +1881,11 @@ function InvoicesView({ invoices, onDelete, onNavigateInvoice, onEditInvoice, pr
     const subtotal = invoice.subtotal ?? items.reduce((s,i)=>s+i.qty*i.price,0);
     const totalGst = invoice.totalGst ?? (iKind==="tax" ? items.reduce((s,i)=>s+i.qty*i.price*(i.gstRate||0)/100,0) : 0);
     const grandTotal = invoice.total || (subtotal + totalGst);
+    const deliveryCharge = invoice.deliveryCharge || 0;
     const dueAmount = invoice.due ?? 0;
     const paidAmt = invoice.paidAmount ?? (invoice.status==="paid" ? grandTotal : 0);
     const statusLabel = invoice.status==="paid"?"PAID":invoice.status==="partial"?"PARTIALLY PAID":"UNPAID";
-    const saleType = invoice.saleType || "normal";
+    const saleType = invoice.source === "marketplace" ? "marketplace" : invoice.saleType || "normal";
     const terms = invoice.status==="paid"
       ? "Payment received in full. Thank you for your business."
       : invoice.status==="partial"
@@ -1761,19 +1995,20 @@ function InvoicesView({ invoices, onDelete, onNavigateInvoice, onEditInvoice, pr
             ${profile.address?`<p>📍 ${esc(profile.address)}</p>`:""}
             ${profile.phone?`<p>📞 ${esc(profile.phone)}</p>`:""}
             ${profile.email?`<p>✉ ${esc(profile.email)}</p>`:""}
-            ${iKind==="tax"&&profile.gst?`<p class="mono">GSTIN: ${esc(profile.gst)}</p>`:""}
+            ${iKind==="tax"&&invoice.supplierGstin?`<p class="mono">GSTIN: ${esc(invoice.supplierGstin)}</p>`:""}
             ${profile.pan?`<p class="mono">PAN: ${esc(profile.pan)}</p>`:""}
           </section>
           <section class="meta-card">
             <div class="status-pill">${esc(statusLabel)}</div>
             <div class="meta-row"><span>Invoice No</span><strong>${esc(invoice.id)}</strong></div>
             <div class="meta-row"><span>Date</span><strong>${esc(invoice.date)}</strong></div>
-            <div class="meta-row"><span>Sale Type</span><strong>${saleType==="cash"?"Cash Sale":"Normal Sale"}</strong></div>
-            <div class="meta-row"><span>Invoice Type</span><strong>${iKind==="tax"?"Tax Invoice":"Invoice"}</strong></div>
+            ${invoice.marketplaceOrderId ? `<div class="meta-row"><span>Marketplace Order</span><strong>${esc(invoice.marketplaceOrderId)}</strong></div>` : ""}
+            <div class="meta-row"><span>Sale Type</span><strong>${saleType==="marketplace"?"Marketplace Order":saleType==="cash"?"Cash Sale":"Normal Sale"}</strong></div>
+            <div class="meta-row"><span>Document Type</span><strong>${esc(documentLabel)}</strong></div>
           </section>
         </div>
 
-        <div class="doc-title">${iKind==="tax"?"Tax Invoice":"Invoice"}</div>
+        <div class="doc-title">${esc(documentLabel)}</div>
 
         <div class="bill-grid">
           <section class="party-card">
@@ -1789,6 +2024,8 @@ function InvoicesView({ invoices, onDelete, onNavigateInvoice, onEditInvoice, pr
             <h2 style="font-size:13px;margin-top:6px">${esc(statusLabel)}</h2>
             <p>Subtotal: <strong>${esc(fmtN(subtotal))}</strong></p>
             ${iKind==="tax"?`<p>GST: <strong>${esc(fmtN(totalGst))}</strong></p>`:""}
+            ${deliveryCharge > 0 ? `<p>Delivery Charge: <strong>${esc(fmtN(deliveryCharge))}</strong></p>` : ""}
+            ${iKind==="bill_of_supply"?`<p>Composition taxable person, not eligible to collect tax on supplies.</p>`:""}
             <p>Grand Total: <strong>${esc(fmtN(grandTotal))}</strong></p>
             ${paidAmt>0?`<p style="color:#16a34a">Paid: <strong>${esc(fmtN(paidAmt))}</strong></p>`:""}
             ${dueAmount>0?`<p style="color:#dc2626">Due: <strong>${esc(fmtN(dueAmount))}</strong></p>`:""}
@@ -1816,6 +2053,7 @@ function InvoicesView({ invoices, onDelete, onNavigateInvoice, onEditInvoice, pr
           <section class="totals-card">
             <div class="t-row"><span class="label">Subtotal</span><span class="val">${esc(fmtN(subtotal))}</span></div>
             ${iKind==="tax"?`<div class="t-row gst-row"><span class="label">GST</span><span class="val">${esc(fmtN(totalGst))}</span></div>`:""}
+            ${deliveryCharge > 0 ? `<div class="t-row"><span class="label">Delivery Charge</span><span class="val">${esc(fmtN(deliveryCharge))}</span></div>` : ""}
             ${paidAmt>0&&invoice.status!=="paid"?`<div class="t-row paid-row"><span class="label">Paid</span><span class="val">${esc(fmtN(paidAmt))}</span></div>`:""}
             ${dueAmount>0?`<div class="t-row due-row"><span class="label">Balance Due</span><span class="val">${esc(fmtN(dueAmount))}</span></div>`:""}
             <div class="grand-row"><span class="gl">Grand Total</span><span class="gv">${esc(fmtN(grandTotal))}</span></div>
@@ -1842,6 +2080,7 @@ function InvoicesView({ invoices, onDelete, onNavigateInvoice, onEditInvoice, pr
   };
   return (
     <div className="space-y-4">
+      {marketplaceRecordsError && <p role="alert" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">{marketplaceRecordsError}</p>}
       {selectedInvoice && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setSelectedInvoice(null)}>
           <div className="bg-card rounded-2xl shadow-2xl w-full max-w-lg border border-border max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
@@ -1856,7 +2095,11 @@ function InvoicesView({ invoices, onDelete, onNavigateInvoice, onEditInvoice, pr
             </div>
             <div className="p-5 space-y-4">
               <div className="grid grid-cols-2 gap-3">
-                {([["Invoice No", selectedInvoice.id], ["Date", selectedInvoice.date], ["Customer", selectedInvoice.customerName], ["Items", String(selectedInvoice.itemCount)], ["Sale Type", selectedInvoice.saleType || "normal"], ["Invoice Kind", selectedInvoice.invoiceKind || "tax"]] as [string,string][]).map(([label, value]) => (
+                {([["Invoice No", selectedInvoice.id], ["Date", selectedInvoice.date], ["Customer", selectedInvoice.customerName], ["Items", String(selectedInvoice.itemCount)], ["Sale Type", selectedInvoice.saleType || "normal"], ["Document Type", getInvoiceDocumentLabel(selectedInvoice.invoiceKind === "tax" && selectedInvoice.gstRegistrationStatus === "regular" && isValidGstin(selectedInvoice.supplierGstin) ? "tax" : selectedInvoice.invoiceKind === "bill_of_supply" ? "bill_of_supply" : "regular", {
+                  status: selectedInvoice.gstRegistrationStatus || "unregistered",
+                  verified: selectedInvoice.gstRegistrationStatus === "regular" && isValidGstin(selectedInvoice.supplierGstin),
+                  gstin: selectedInvoice.supplierGstin || selectedInvoice.registrationGstinSnapshot,
+                })]] as [string,string][]).map(([label, value]) => (
                   <div key={label} className="p-3 bg-muted/40 rounded-xl">
                     <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">{label}</p>
                     <p className="text-sm text-foreground capitalize font-medium">{value}</p>
@@ -1904,10 +2147,10 @@ function InvoicesView({ invoices, onDelete, onNavigateInvoice, onEditInvoice, pr
             </div>
             <div className="flex gap-3 p-5 pt-0">
               <button onClick={() => setSelectedInvoice(null)} className="flex-1 py-2.5 border border-border rounded-xl text-sm text-muted-foreground hover:bg-muted transition-colors">Close</button>
-              <button onClick={() => { if (window.confirm(`Delete invoice ${selectedInvoice.id}?`)) { onDelete(selectedInvoice.id); setSelectedInvoice(null); } }}
+              {selectedInvoice.source !== "marketplace" && <button onClick={() => { if (window.confirm(`Delete invoice ${selectedInvoice.id}?`)) { onDelete(selectedInvoice.id); setSelectedInvoice(null); } }}
                 className="px-4 py-2.5 bg-red-50 text-red-600 border border-red-200 rounded-xl text-sm font-medium hover:bg-red-100 transition-colors">
                 <Trash2 className="w-4 h-4 inline mr-1" />Delete
-              </button>
+              </button>}
             </div>
           </div>
         </div>
@@ -1961,7 +2204,10 @@ function InvoicesView({ invoices, onDelete, onNavigateInvoice, onEditInvoice, pr
                 {filtered.map((invoice) => (
                   <tr key={invoice.id} onClick={() => openBill(invoice)}
                     className="border-b border-border/50 hover:bg-muted/50 transition-colors cursor-pointer">
-                    <td className="py-3 px-3 font-[DM_Mono] text-primary font-semibold">{invoice.id}</td>
+                    <td className="py-3 px-3 font-[DM_Mono] text-primary font-semibold">
+                      {invoice.id}
+                      {invoice.source === "marketplace" && <span className="block mt-1 font-sans text-[10px] text-blue-600">Marketplace · {invoice.marketplaceOrderId}</span>}
+                    </td>
                     <td className="py-3 px-3 text-muted-foreground">{invoice.date}</td>
                     <td className="py-3 px-3 text-foreground font-medium">{invoice.customerName}</td>
                     <td className="py-3 px-3 font-[DM_Mono] font-semibold">{fmt(invoice.total)}</td>
@@ -1976,8 +2222,8 @@ function InvoicesView({ invoices, onDelete, onNavigateInvoice, onEditInvoice, pr
                     <td className="py-3 px-3 text-right" onClick={(e) => e.stopPropagation()}>
                       <div className="flex gap-1 justify-end">
                         <button onClick={() => openBill(invoice)} className="text-xs text-blue-600 hover:text-blue-800 font-semibold px-2 py-1 rounded hover:bg-blue-50 transition-colors">🧾 View Bill</button>
-                        <button onClick={() => onEditInvoice?.(invoice.id)} className="text-xs text-amber-600 hover:text-amber-800 font-semibold px-2 py-1 rounded hover:bg-amber-50 transition-colors">✎ Edit</button>
-                        <button onClick={() => { if (window.confirm(`Delete ${invoice.id}?`)) onDelete(invoice.id); }} className="text-xs text-red-600 hover:text-red-800 font-semibold px-2 py-1 rounded hover:bg-red-50 transition-colors">Delete</button>
+                        {invoice.source !== "marketplace" && <button onClick={() => onEditInvoice?.(invoice.id)} className="text-xs text-amber-600 hover:text-amber-800 font-semibold px-2 py-1 rounded hover:bg-amber-50 transition-colors">✎ Edit</button>}
+                        {invoice.source !== "marketplace" && <button onClick={() => { if (window.confirm(`Delete ${invoice.id}?`)) onDelete(invoice.id); }} className="text-xs text-red-600 hover:text-red-800 font-semibold px-2 py-1 rounded hover:bg-red-50 transition-colors">Delete</button>}
                       </div>
                     </td>
                   </tr>
@@ -1994,11 +2240,15 @@ function InvoicesView({ invoices, onDelete, onNavigateInvoice, onEditInvoice, pr
 
 // ─── Barcode ──────────────────────────────────────────────────────────────────
 // ─── Cash Sale POS Billing ─────────────────────────────────────────────────────
-function CashSaleView({ products, customers, profile, settings, onSave, invoices, devices }: {
+function CashSaleView({ products, customers, profile, settings, onSave, invoices, devices, gstRegistration, gstRegistrationLoading, shopId, shopOwnerUid }: {
   products: Product[]; customers: Customer[]; profile: Profile; settings: AppSettings;
-  onSave: (inv: InvoiceRecord) => void;
+  onSave: (inv: InvoiceRecord) => Promise<boolean> | boolean;
   invoices: InvoiceRecord[];
   devices: PaymentDevice[];
+  gstRegistration: VerifiedGstRegistration | null;
+  gstRegistrationLoading: boolean;
+  shopId?: string;
+  shopOwnerUid?: string;
 }) {
   const makeEmptyRow = (): POSLineItem => ({
     rowId: Math.random().toString(36).slice(2),
@@ -2009,6 +2259,12 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
   const [rows, setRows] = useState<POSLineItem[]>(() => [makeEmptyRow()]);
   const [customerName, setCustomerName] = useState("Walk-in Customer");
   const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().split("T")[0]);
+  const allowedInvoiceTypes = getAllowedInvoiceTypes(gstRegistration);
+  const [invoiceKind, setInvoiceKind] = useState<InvoiceKind>(allowedInvoiceTypes[0] || "regular");
+  const [invoiceError, setInvoiceError] = useState("");
+  useEffect(() => {
+    if (!allowedInvoiceTypes.includes(invoiceKind)) setInvoiceKind(allowedInvoiceTypes[0] || "regular");
+  }, [gstRegistration, invoiceKind, allowedInvoiceTypes]);
 
   const [paymentMode, setPaymentMode] = useState<"cash" | "upi" | "card" | "posdevice" | "mixed">("cash");
   const [amountReceived, setAmountReceived] = useState<string>("");
@@ -2030,7 +2286,7 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
   // Keep cursor on barcode column of last row after any row changes (continuous scanning)
   useEffect(() => {
     const lastRow = rows[rows.length - 1];
-    if (lastRow && !lastRow.name) {
+    if (lastRow && !lastRow.name && !document.querySelector("[data-camera-scanner]")) {
       const el = cellRefs.current[`${lastRow.rowId}-barcode`];
       el?.focus();
     }
@@ -2093,6 +2349,33 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
     });
   };
 
+  const [scanNote, setScanNote] = useState("");
+  const handleExternalScan = (code: string) => {
+    const product = matchProduct(code);
+    if (!product) {
+      setScanNote(`No registered product for "${normalizeScanCode(code)}".`);
+      return;
+    }
+    setRows((prev) => {
+      const existing = prev.find((r) => r.productId === product.id);
+      let next: POSLineItem[];
+      if (existing) {
+        next = prev.map((r) => (r.productId === product.id ? { ...r, qty: r.qty + 1 } : r));
+      } else {
+        const fields = { barcode: product.barcode, itemCode: product.sku, name: product.name, productId: product.id, rate: product.price, unit: product.unit, taxPct: Number(settings.defaultGst) };
+        const emptyIdx = prev.findIndex((r) => !r.name && !r.productId);
+        next = emptyIdx >= 0
+          ? prev.map((r, i) => (i === emptyIdx ? { ...r, ...fields } : r))
+          : [...prev, { ...makeEmptyRow(), ...fields }];
+      }
+      const last = next[next.length - 1];
+      return last && !last.name ? next : [...next, makeEmptyRow()];
+    });
+    setScanNote(`Added ${product.name}`);
+  };
+  // USB/Bluetooth barcode scanner works even when no cell is focused
+  useHardwareScanner(handleExternalScan);
+
   const handleKeyNav = (e: React.KeyboardEvent<HTMLInputElement>, rowIdx: number, colIdx: number) => {
     const row = rows[rowIdx];
     if (e.key === "Enter" || e.key === "Tab") {
@@ -2145,7 +2428,9 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
     const base = (Number(r.qty) || 0) * (Number(r.rate) || 0);
     return s + base * ((Number(r.discountPct) || 0) / 100);
   }, 0);
-  const taxAmount = validRows.reduce((s, r) => s + lineAmount(r) * ((Number(r.taxPct) || 0) / 100), 0);
+  const taxAmount = invoiceKind === "tax"
+    ? validRows.reduce((s, r) => s + lineAmount(r) * ((Number(r.taxPct) || 0) / 100), 0)
+    : 0;
   const rawTotal = subtotal + taxAmount;
   const roundedTotal = Math.round(rawTotal);
   const roundOff = roundedTotal - rawTotal;
@@ -2199,7 +2484,7 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
       due: balance,
       paidAmount: received,
       saleType: "cash",
-      invoiceKind: "regular",
+      invoiceKind,
       source: "pos",
       items,
       paymentMode,
@@ -2214,22 +2499,44 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
     };
   };
 
-  const handleSave = () => {
+  const validateInvoiceType = async () => {
+    const registration = shopId && shopOwnerUid
+      ? await loadShopGstRegistration(shopId, shopOwnerUid)
+      : null;
+    assertInvoiceTypeAllowed(registration, invoiceKind);
+    return registration;
+  };
+
+  const handleSave = async () => {
     const rec = buildInvoiceRecord();
     if (!rec) return;
-    onSave(rec);
+    try {
+      await validateInvoiceType();
+      if (await onSave(rec) === false) return;
+    } catch (error) {
+      setInvoiceError(error instanceof Error ? error.message : "GST registration could not be validated.");
+      return;
+    }
     setSavedFlash(true);
     setTimeout(() => setSavedFlash(false), 1800);
     resetBilling();
   };
 
-  const handlePrint = () => {
+  const handlePrint = async () => {
     const rec = buildInvoiceRecord();
     if (!rec) return;
-    onSave(rec);
+    let registration: VerifiedGstRegistration | null;
+    try {
+      registration = await validateInvoiceType();
+      if (await onSave(rec) === false) return;
+    } catch (error) {
+      setInvoiceError(error instanceof Error ? error.message : "GST registration could not be validated.");
+      return;
+    }
     const esc = (v: any) => String(v ?? "").replace(/[&<>"']/g, (ch: string) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch] || ch));
     const rowsHtml = (rec.items || []).map((it, idx) => `
-      <tr><td>${idx + 1}</td><td>${esc(it.name)}</td><td style="text-align:center">${it.qty}</td><td style="text-align:right">₹${it.price.toFixed(2)}</td><td style="text-align:right">${it.gstRate}%</td><td style="text-align:right;font-weight:700">₹${(it.qty * it.price).toFixed(2)}</td></tr>`).join("");
+      <tr><td>${idx + 1}</td><td>${esc(it.name)}</td><td style="text-align:center">${it.qty}</td><td style="text-align:right">₹${it.price.toFixed(2)}</td>${invoiceKind === "tax" ? `<td style="text-align:right">${it.gstRate}%</td>` : ""}<td style="text-align:right;font-weight:700">₹${(it.qty * it.price * (invoiceKind === "tax" ? 1 + it.gstRate / 100 : 1)).toFixed(2)}</td></tr>`).join("");
+    const documentLabel = getInvoiceDocumentLabel(invoiceKind, registration);
     const html = `<!DOCTYPE html><html><head><title>${esc(rec.id)}</title><style>
       body{font-family:Arial,sans-serif;font-size:13px;padding:16px;color:#111}
       table{width:100%;border-collapse:collapse;margin-top:10px}
@@ -2241,12 +2548,15 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
     </style></head><body>
       <h2 style="margin:0">${esc(profile.shopName || "Your Business")}</h2>
       <p style="margin:2px 0;color:#555">${esc(profile.address || "")} ${profile.phone ? "· " + esc(profile.phone) : ""}</p>
+      <h3>${esc(documentLabel)}</h3>
+      ${invoiceKind === "tax" && registration?.gstin ? `<p>GSTIN: ${esc(registration.gstin)}</p>` : ""}
       <p style="margin:6px 0;font-weight:700">${esc(rec.id)} &nbsp;·&nbsp; ${esc(rec.date)} &nbsp;·&nbsp; ${esc(rec.customerName)}</p>
-      <table><thead><tr><th>#</th><th>Item</th><th>Qty</th><th>Rate</th><th>Tax</th><th style="text-align:right">Amount</th></tr></thead><tbody>${rowsHtml}</tbody></table>
+      <table><thead><tr><th>#</th><th>Item</th><th>Qty</th><th>Rate</th>${invoiceKind === "tax" ? "<th>GST</th>" : ""}<th style="text-align:right">Amount</th></tr></thead><tbody>${rowsHtml}</tbody></table>
       <div style="margin-top:14px;max-width:280px;margin-left:auto">
         <div class="tot"><span>Subtotal</span><span>₹${subtotal.toFixed(2)}</span></div>
         <div class="tot"><span>Discount</span><span>−₹${discountAmount.toFixed(2)}</span></div>
-        <div class="tot"><span>Tax</span><span>₹${taxAmount.toFixed(2)}</span></div>
+        ${invoiceKind === "tax" ? `<div class="tot"><span>GST</span><span>₹${taxAmount.toFixed(2)}</span></div>` : ""}
+        ${invoiceKind === "bill_of_supply" ? `<div class="tot"><span>Composition taxable person, not eligible to collect tax on supplies.</span></div>` : ""}
         <div class="tot"><span>Round Off</span><span>${roundOff >= 0 ? "+" : ""}₹${roundOff.toFixed(2)}</span></div>
         <div class="tot grand"><span>Grand Total</span><span>₹${grandTotal.toFixed(2)}</span></div>
       </div>
@@ -2305,8 +2615,34 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
           <input type="date" value={invoiceDate} onChange={(e) => setInvoiceDate(e.target.value)}
             className="px-2 py-1.5 bg-background border border-border rounded-lg text-xs font-[DM_Mono] focus:outline-none focus:ring-2 focus:ring-primary/30" />
         </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-muted-foreground">Invoice Type</label>
+          <select
+            value={invoiceKind}
+            disabled={gstRegistrationLoading}
+            onChange={(event) => {
+              setInvoiceError("");
+              setInvoiceKind(event.target.value as InvoiceKind);
+            }}
+            className="px-2 py-1.5 bg-background border border-border rounded-lg text-xs"
+          >
+            {allowedInvoiceTypes.map((kind) => (
+              <option key={kind} value={kind}>
+                {kind === "tax" ? "GST Tax Invoice" : kind === "bill_of_supply" ? "Bill of Supply" : "Non-GST Bill / Receipt"}
+              </option>
+            ))}
+          </select>
+        </div>
+        {invoiceKind === "tax" && (
+          <span className="text-[10px] text-blue-700">
+            GST TAX INVOICE: Select this option only if your shop has a valid GST registration number (GSTIN).
+          </span>
+        )}
+        {invoiceError && <span className="text-xs text-red-600" role="alert">{invoiceError}</span>}
         {savedFlash && <span className="text-xs font-semibold text-emerald-600 flex items-center gap-1"><Check className="w-3.5 h-3.5" /> Saved!</span>}
         <div className="ml-auto flex items-center gap-2">
+          {scanNote && <span className="text-xs text-muted-foreground max-w-[200px] truncate">{scanNote}</span>}
+          <CameraScanButton label="Scan" title="Scan items with camera" keepOpen onDetected={handleExternalScan} className="text-xs px-3 py-1.5 border border-border rounded-lg text-muted-foreground hover:bg-muted transition-colors flex items-center gap-1.5" />
           <button onClick={handleHold} className="text-xs px-3 py-1.5 border border-border rounded-lg text-muted-foreground hover:bg-muted transition-colors flex items-center gap-1.5">
             <Clock className="w-3.5 h-3.5" /> Hold
           </button>
@@ -2328,7 +2664,7 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
               <th className="px-2 py-2 text-center font-semibold border-r border-white/10 w-20">Unit</th>
               <th className="px-2 py-2 text-right font-semibold border-r border-white/10 w-24">Rate</th>
               <th className="px-2 py-2 text-right font-semibold border-r border-white/10 w-20">Disc%</th>
-              <th className="px-2 py-2 text-right font-semibold border-r border-white/10 w-20">Tax%</th>
+              {invoiceKind === "tax" && <th className="px-2 py-2 text-right font-semibold border-r border-white/10 w-20">GST%</th>}
               <th className="px-2 py-2 text-right font-semibold w-28">Amount</th>
               <th className="w-8"></th>
             </tr>
@@ -2376,13 +2712,13 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
                     onChange={(e) => updateRow(row.rowId, "discountPct", Number(e.target.value))} onKeyDown={(e) => handleKeyNav(e, rowIdx, 6)}
                     className="w-full px-2 py-1.5 bg-transparent text-xs text-right font-[DM_Mono] focus:outline-none focus:bg-primary/10" />
                 </td>
-                <td className="border-r border-border/60 p-0">
+                {invoiceKind === "tax" && <td className="border-r border-border/60 p-0">
                   <input ref={(el) => { cellRefs.current[`${row.rowId}-taxPct`] = el; }} type="number" value={row.taxPct}
                     onChange={(e) => updateRow(row.rowId, "taxPct", Number(e.target.value))} onKeyDown={(e) => handleKeyNav(e, rowIdx, 7)}
                     className="w-full px-2 py-1.5 bg-transparent text-xs text-right font-[DM_Mono] focus:outline-none focus:bg-primary/10" />
-                </td>
+                </td>}
                 <td className="px-2 py-1.5 text-right font-[DM_Mono] font-bold text-foreground">
-                  {row.name ? fmt(lineAmount(row) * (1 + (Number(row.taxPct) || 0) / 100)) : ""}
+                  {row.name ? fmt(lineAmount(row) * (invoiceKind === "tax" ? 1 + (Number(row.taxPct) || 0) / 100 : 1)) : ""}
                 </td>
                 <td className="text-center">
                   {rows.length > 1 && (
@@ -2407,7 +2743,7 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
             ["Qty", String(totalQty)],
             ["Subtotal", fmt(subtotal)],
             ["Discount", fmt(discountAmount)],
-            ["Tax", fmt(taxAmount)],
+            ...(invoiceKind === "tax" ? [["GST", fmt(taxAmount)]] : []),
             ["Round Off", `${roundOff >= 0 ? "+" : ""}${roundOff.toFixed(2)}`],
           ].map(([label, val]) => (
             <div key={label} className="text-center">
@@ -3780,6 +4116,19 @@ function BarcodeView({ products }: { products: Product[] }) {
   const [qty, setQty] = useState(1);
   const [paperSize, setPaperSize] = useState("A4");
   const [labelSize, setLabelSize] = useState("medium");
+  const [scanInput, setScanInput] = useState("");
+  const [scanResult, setScanResult] = useState<{ code: string; product: Product | null } | null>(null);
+  const handleScan = (raw: string) => {
+    const code = normalizeScanCode(raw);
+    if (!code) return;
+    const product = products.find((p) => normalizeScanCode(p.barcode) === code || normalizeScanCode(p.sku) === code) || null;
+    setScanResult({ code, product });
+    setBarcodeValue(product ? product.barcode : code);
+    if (product) { setLabelText(product.name); setMrp(String(product.price)); }
+    setScanInput("");
+  };
+  useHardwareScanner(handleScan);
+
   const labelSizes = { small: { w: "38mm", h: "13mm", label: "Small (38×13mm)" }, medium: { w: "50mm", h: "25mm", label: "Medium (50×25mm)" }, large: { w: "100mm", h: "50mm", label: "Large (100×50mm)" } };
   const cols = paperSize === "A4" ? Math.floor(210 / parseFloat(labelSizes[labelSize as keyof typeof labelSizes].w)) : 3;
 
@@ -3795,6 +4144,28 @@ function BarcodeView({ products }: { products: Product[] }) {
 
   return (
     <div className="space-y-4">
+      <div className="bg-card rounded-xl p-5 border border-border shadow-sm space-y-3">
+        <h3 className="font-semibold text-foreground flex items-center gap-2"><QrCode className="w-4 h-4" /> Scan Barcode</h3>
+        <p className="text-xs text-muted-foreground">Use a USB/Bluetooth barcode scanner, or tap the camera icon on mobile/tablet.</p>
+        <div className="flex gap-2">
+          <input
+            value={scanInput}
+            onChange={(e) => setScanInput(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleScan(scanInput)}
+            placeholder="Scan or type barcode / SKU"
+            className="flex-1 min-w-0 px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+          />
+          <button onClick={() => handleScan(scanInput)} className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors">Find</button>
+          <CameraScanButton label="" title="Scan with camera" onDetected={handleScan} />
+        </div>
+        {scanResult && (
+          <p className={`text-xs ${scanResult.product ? "text-emerald-600" : "text-amber-600"}`}>
+            {scanResult.product
+              ? `Found: ${scanResult.product.name} (${scanResult.code}) · stock ${scanResult.product.stock} · ${fmt(scanResult.product.price)}`
+              : `No registered product for ${scanResult.code}. Loaded into the label generator below.`}
+          </p>
+        )}
+      </div>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="bg-card rounded-xl p-5 border border-border shadow-sm space-y-4">
           <h3 className="font-semibold text-foreground">Barcode Generator</h3>
@@ -3902,14 +4273,74 @@ function GSTView({ profile }: { profile: Profile }) {
 }
 
 // ─── Customers ────────────────────────────────────────────────────────────────
-function CustomersView({ customers, setCustomers, profile }: {
-  customers: Customer[]; setCustomers: (v: Customer[] | ((p: Customer[]) => Customer[])) => void; profile: Profile;
+function CustomersView({ customers, setCustomers, profile, marketplaceCustomers, shopId, marketplaceRecordsError }: {
+  customers: Customer[];
+  setCustomers: (v: Customer[] | ((p: Customer[]) => Customer[])) => void;
+  profile: Profile;
+  marketplaceCustomers: MarketplaceCustomerRecord[];
+  shopId: string;
+  marketplaceRecordsError?: string | null;
 }) {
   const [search, setSearch] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [selected, setSelected] = useState<number | null>(null);
+  const [orderHistoryCustomerId, setOrderHistoryCustomerId] = useState<string | null>(null);
+  const [selectedOrderInvoice, setSelectedOrderInvoice] = useState<LocalOrder | null>(null);
+  const [historyOrders, setHistoryOrders] = useState<LocalOrder[]>([]);
+  const [historyCursor, setHistoryCursor] = useState<CustomerShopOrderCursor | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", phone: "", email: "", address: "", gst: "" });
   const filtered = customers.filter((c) => c.name.toLowerCase().includes(search.toLowerCase()) || c.phone.includes(search));
+  const filteredMarketplaceCustomers = marketplaceCustomers.filter((c) =>
+    (c.name || "").toLowerCase().includes(search.toLowerCase()) ||
+    (c.phone || "").includes(search) ||
+    (c.email || "").toLowerCase().includes(search.toLowerCase())
+  );
+  const selectedCustomerOrders = historyOrders;
+
+  useEffect(() => {
+    if (!orderHistoryCustomerId) {
+      setHistoryOrders([]);
+      setHistoryCursor(null);
+      setHistoryError(null);
+      return;
+    }
+    let active = true;
+    setHistoryOrders([]);
+    setHistoryCursor(null);
+    setHistoryLoading(true);
+    setHistoryError(null);
+    getCustomerShopOrderPage(shopId, orderHistoryCustomerId)
+      .then((page) => {
+        if (!active) return;
+        setHistoryOrders(page.orders);
+        setHistoryCursor(page.nextCursor);
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setHistoryError(error instanceof Error ? error.message : "Could not load customer order history.");
+      })
+      .finally(() => {
+        if (active) setHistoryLoading(false);
+      });
+    return () => { active = false; };
+  }, [orderHistoryCustomerId, shopId]);
+
+  const loadMoreCustomerOrders = async () => {
+    if (!orderHistoryCustomerId || !historyCursor || historyLoading) return;
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const page = await getCustomerShopOrderPage(shopId, orderHistoryCustomerId, historyCursor);
+      setHistoryOrders((previous) => [...previous, ...page.orders]);
+      setHistoryCursor(page.nextCursor);
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : "Could not load more customer orders.");
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
 
   const handleAdd = () => {
     if (!form.name) return;
@@ -3925,6 +4356,7 @@ function CustomersView({ customers, setCustomers, profile }: {
 
   return (
     <div className="space-y-4">
+      {marketplaceRecordsError && <p role="alert" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">{marketplaceRecordsError}</p>}
       <div className="flex gap-3">
         <div className="flex-1 relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
@@ -3960,9 +4392,9 @@ function CustomersView({ customers, setCustomers, profile }: {
         </div>
       )}
 
-      {customers.length === 0 ? (
+      {customers.length === 0 && marketplaceCustomers.length === 0 ? (
         <EmptyState icon={Users} title="No customers yet" desc="Add your first customer to start managing contacts and sending invoices." action={<button onClick={() => setShowAdd(true)} className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-xl text-sm font-medium hover:bg-primary/90 transition-colors"><Plus className="w-4 h-4" /> Add First Customer</button>} />
-      ) : (
+      ) : customers.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {filtered.map((c) => (
             <div key={c.id} onClick={() => setSelected(selected === c.id ? null : c.id)}
@@ -3992,18 +4424,120 @@ function CustomersView({ customers, setCustomers, profile }: {
           ))}
         </div>
       )}
+      {marketplaceCustomers.length > 0 && (
+        <section className="space-y-3">
+          <div>
+            <h3 className="font-semibold text-foreground">NearBasket Customers</h3>
+            <p className="text-xs text-muted-foreground">Customers are scoped to this shop and identified by their authenticated account.</p>
+          </div>
+          {filteredMarketplaceCustomers.length ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {filteredMarketplaceCustomers.map((customer) => (
+                <div key={customer.customerId} className="bg-card rounded-xl p-4 border border-border shadow-sm">
+                  <div className="flex items-start justify-between">
+                    <div className="w-10 h-10 rounded-full bg-blue-50 flex items-center justify-center text-blue-700 font-bold">
+                      {(customer.name || "M").charAt(0).toUpperCase()}
+                    </div>
+                    <span className="text-[10px] text-muted-foreground">
+                      Last order {new Date(customer.lastOrderAt).toLocaleDateString("en-IN")}
+                    </span>
+                  </div>
+                  <p className="font-semibold text-sm text-foreground mt-3">{customer.name || "Marketplace customer"}</p>
+                  {customer.phone && <p className="text-xs text-muted-foreground mt-1">{customer.phone}</p>}
+                  {customer.email && <p className="text-xs text-muted-foreground mt-1">{customer.email}</p>}
+                  <button
+                    onClick={() => setOrderHistoryCustomerId(customer.customerId)}
+                    className="mt-3 w-full px-3 py-2 bg-primary/5 text-primary border border-primary/20 rounded-lg text-xs font-semibold hover:bg-primary/10"
+                  >
+                    View Order History
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground py-3">No marketplace customers match this search.</p>
+          )}
+        </section>
+      )}
+      {orderHistoryCustomerId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setOrderHistoryCustomerId(null)}>
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-label="Customer order history"
+            className="bg-card rounded-2xl shadow-2xl w-full max-w-2xl border border-border max-h-[85vh] overflow-y-auto p-5 space-y-4"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-foreground">Marketplace Order History</h3>
+                <p className="text-xs text-muted-foreground">This shop only · customer account {orderHistoryCustomerId}</p>
+              </div>
+              <button onClick={() => setOrderHistoryCustomerId(null)} className="p-2 hover:bg-muted rounded-lg" aria-label="Close order history">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            {historyError && <p role="alert" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">{historyError}</p>}
+            {historyLoading && selectedCustomerOrders.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-8 text-center">Loading this shop's orders…</p>
+            ) : selectedCustomerOrders.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-8 text-center">No orders from this customer at this shop.</p>
+            ) : selectedCustomerOrders.map((order) => (
+              <article key={order.id} className="border border-border rounded-xl p-4 space-y-2">
+                <div className="flex justify-between gap-3">
+                  <p className="font-semibold text-sm">{order.orderNumber}</p>
+                  <span className="text-xs capitalize text-muted-foreground">{order.status.replace(/_/g, " ")}</span>
+                </div>
+                <p className="text-xs text-muted-foreground">{new Date(order.createdAt).toLocaleString("en-IN")}</p>
+                <p className="text-xs">{order.items.map((item) => `${item.productName} × ${item.quantity} (${fmt(item.unitPrice / 100)})`).join(", ")}</p>
+                <p className="text-xs">Total: <strong>{fmt(order.totalAmount / 100)}</strong> · Payment: {order.paymentMethod.replace(/_/g, " ")} ({order.paymentStatus})</p>
+                <div className="flex justify-between items-center">
+                  {order.invoice && <span className="text-xs text-muted-foreground">Invoice: {order.invoice.invoiceNumber}</span>}
+                  {order.invoice && (
+                    <button onClick={() => setSelectedOrderInvoice(order)} className="text-xs font-semibold text-primary hover:underline">
+                      View invoice
+                    </button>
+                  )}
+                </div>
+              </article>
+            ))}
+            {historyCursor && (
+              <button
+                onClick={() => void loadMoreCustomerOrders()}
+                disabled={historyLoading}
+                className="w-full px-3 py-2 border border-border rounded-lg text-xs font-semibold disabled:opacity-50"
+              >
+                {historyLoading ? "Loading…" : "Load more orders"}
+              </button>
+            )}
+          </section>
+        </div>
+      )}
+      {selectedOrderInvoice && (
+        <InvoiceModal order={selectedOrderInvoice} onClose={() => setSelectedOrderInvoice(null)} />
+      )}
     </div>
   );
 }
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
-function SettingsView({ settings, setSettings, profile, setProfile, isAccountEmailLocked }: {
+function SettingsView({ settings, setSettings, profile, setProfile, isAccountEmailLocked, shopId, shopOwnerUid, gstRegistration, gstRegistrationLoading, onSubmitGstRegistration }: {
   settings: AppSettings; setSettings: (v: AppSettings | ((p: AppSettings) => AppSettings)) => void;
   profile: Profile; setProfile: (v: Profile | ((p: Profile) => Profile)) => void;
   isAccountEmailLocked: boolean;
+  shopId?: string;
+  shopOwnerUid?: string;
+  gstRegistration: VerifiedGstRegistration | null;
+  gstRegistrationLoading: boolean;
+  onSubmitGstRegistration: (gstin: string, scheme: "regular" | "composition") => Promise<void>;
 }) {
   const [saved, setSaved] = useState(false);
   const [localProfile, setLocalProfile] = useState(profile);
+  const [gstinClaim, setGstinClaim] = useState(profile.gst || "");
+  const [requestedScheme, setRequestedScheme] = useState<"regular" | "composition">("regular");
+  const [gstSubmissionError, setGstSubmissionError] = useState<string | null>(null);
+  const [gstSubmissionSuccess, setGstSubmissionSuccess] = useState<string | null>(null);
+  const [isSubmittingGstClaim, setIsSubmittingGstClaim] = useState(false);
 
   const setLogoFromFile = (file?: File) => {
     if (!file) return;
@@ -4018,6 +4552,22 @@ function SettingsView({ settings, setSettings, profile, setProfile, isAccountEma
     setProfile(localProfile);
     setSaved(true);
     setTimeout(() => setSaved(false), 2500);
+  };
+
+  const handleSubmitGstClaim = async () => {
+    setIsSubmittingGstClaim(true);
+    setGstSubmissionError(null);
+    setGstSubmissionSuccess(null);
+    try {
+      await onSubmitGstRegistration(gstinClaim, requestedScheme);
+      setLocalProfile((current) => ({ ...current, gst: gstinClaim.trim().toUpperCase() }));
+      setProfile((current) => ({ ...current, gst: gstinClaim.trim().toUpperCase() }));
+      setGstSubmissionSuccess("GSTIN submitted. GST invoices remain unavailable until an administrator verifies the registration.");
+    } catch (error) {
+      setGstSubmissionError(error instanceof Error ? error.message : "Could not submit GST registration.");
+    } finally {
+      setIsSubmittingGstClaim(false);
+    }
   };
 
   const Toggle = ({ label, desc, field }: { label: string; desc: string; field: keyof AppSettings }) => (
@@ -4064,6 +4614,68 @@ function SettingsView({ settings, setSettings, profile, setProfile, isAccountEma
           </div>
         </div>
       </div>
+
+      {shopId && shopOwnerUid && (
+        <div className="bg-card rounded-xl p-5 border border-border shadow-sm space-y-3">
+          <div>
+            <h3 className="font-semibold text-foreground">GST Registration Verification</h3>
+            <p className="text-xs text-muted-foreground mt-1">
+              Entering a GSTIN in Business Information does not verify it. Submit the GSTIN and scheme here for an administrator to review.
+            </p>
+          </div>
+          <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs">
+            <span className="font-semibold">Current verified status: </span>
+            {gstRegistration?.verified
+              ? `${gstRegistration.status} (verified)`
+              : gstRegistration?.status === "pending_verification"
+                ? "Pending administrator verification"
+                : gstRegistration?.status
+                  ? `${gstRegistration.status} (not enabled for GST invoices)`
+                  : "No verified GST registration record"}
+          </div>
+          {(gstRegistration?.status === "pending_verification" || !gstRegistration) ? (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-muted-foreground mb-1">GSTIN</label>
+                  <input
+                    value={gstinClaim}
+                    onChange={(event) => setGstinClaim(event.target.value.toUpperCase())}
+                    placeholder="15-character GSTIN"
+                    autoComplete="off"
+                    className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted-foreground mb-1">Claimed scheme</label>
+                  <select
+                    value={requestedScheme}
+                    onChange={(event) => setRequestedScheme(event.target.value as "regular" | "composition")}
+                    className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  >
+                    <option value="regular">Regular GST scheme</option>
+                    <option value="composition">Composition scheme</option>
+                  </select>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleSubmitGstClaim()}
+                disabled={isSubmittingGstClaim || gstRegistrationLoading}
+                className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium disabled:opacity-50"
+              >
+                {isSubmittingGstClaim ? "Submitting…" : "Submit GSTIN for verification"}
+              </button>
+            </>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              To change a verified, unregistered, or suspended status, contact an administrator. Shopkeepers cannot approve their own GST registration.
+            </p>
+          )}
+          {gstSubmissionError && <p role="alert" className="text-xs text-red-700">{gstSubmissionError}</p>}
+          {gstSubmissionSuccess && <p role="status" className="text-xs text-emerald-700">{gstSubmissionSuccess}</p>}
+        </div>
+      )}
 
       <div className="bg-card rounded-xl p-5 border border-border shadow-sm space-y-4">
         <h3 className="font-semibold text-foreground">Tax & Billing</h3>
@@ -4231,6 +4843,12 @@ function ClosedPPIView({ cards, setCards, profile }: {
   const [rMethod, setRMethod] = useState("Cash");
   const [rNote, setRNote] = useState("");
   const [cForm, setCForm] = useState({ name: "", mobile: "", email: "", address: "", category: "regular" as PPICard["category"], walletLimit: "10000", kycStatus: "pending" as PPICard["kycStatus"], months: "12" });
+
+  const { isMobile } = useDeviceType();
+  const [showScan, setShowScan] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const handlePpiScan = (raw: string) => { setSearch(normalizeScanCode(raw)); setFilter("all"); };
+  useHardwareScanner(handlePpiScan);
 
   const today = new Date().toISOString().split("T")[0];
   const daysUntil = (d: string) => Math.ceil((new Date(d).getTime() - Date.now()) / 86400000);
@@ -4426,16 +5044,20 @@ function ClosedPPIView({ cards, setCards, profile }: {
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="relative flex-1 min-w-0">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name, mobile, or Card ID…"
+            <input ref={searchInputRef} value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name, mobile, or Card ID…"
               className="w-full pl-9 pr-4 py-2.5 bg-background border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
           </div>
           <div className="flex flex-wrap gap-2 justify-end">
             <button onClick={() => setShowCreate(!showCreate)} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors shadow-sm whitespace-nowrap">
               <Plus className="w-4 h-4" /> New PPI Card
             </button>
-            <button className="flex items-center gap-2 px-4 py-2 rounded-xl border border-border bg-background text-sm text-muted-foreground hover:bg-muted transition-colors">
+            <button
+              onClick={() => (isMobile ? setShowScan(true) : searchInputRef.current?.focus())}
+              title={isMobile ? "Scan card with camera" : "Scan card with barcode scanner"}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl border border-border bg-background text-sm text-muted-foreground hover:bg-muted transition-colors">
               <QrCode className="w-4 h-4" /> Scan
             </button>
+            <CameraScannerModal open={showScan} onClose={() => setShowScan(false)} onDetected={handlePpiScan} title="Scan PPI card" />
           </div>
         </div>
         <div className="mt-3 flex flex-wrap gap-2">
@@ -4800,7 +5422,7 @@ const TITLES: Record<Tab, string> = {
 };
 
 // ─── Root App ─────────────────────────────────────────────────────────────────
-export default function App({
+function BillingApp({
   firebaseUser,
   onFirebaseLogout,
   initialTab = "dashboard",
@@ -4819,11 +5441,16 @@ export default function App({
   const storageKey = activeAccount?.storageKey || "billpro_no_active_account";
   const scoped = (key: string) => scopedStorageKey(storageKey, key);
   const [profile, setProfileBase] = useLocalStorage<Profile>(scoped("profile"), DEFAULT_PROFILE);
+  const [gstRegistration, setGstRegistration] = useState<VerifiedGstRegistration | null>(null);
+  const [gstRegistrationLoading, setGstRegistrationLoading] = useState(Boolean(firebaseUser?.shopId));
   const [settings, setSettings] = useLocalStorage<AppSettings>(scoped("settings"), DEFAULT_SETTINGS);
   const [products, setProducts] = useLocalStorage<Product[]>(scoped("products"), []);
   const [customers, setCustomers] = useLocalStorage<Customer[]>(scoped("customers"), []);
   const [demands, setDemands] = useLocalStorage<DemandOrder[]>(scoped("demands"), []);
   const [invoices, setInvoices] = useLocalStorage<InvoiceRecord[]>(scoped("invoices"), []);
+  const [marketplaceInvoices, setMarketplaceInvoices] = useState<InvoiceRecord[]>([]);
+  const [marketplaceCustomers, setMarketplaceCustomers] = useState<MarketplaceCustomerRecord[]>([]);
+  const [marketplaceRecordsError, setMarketplaceRecordsError] = useState<string | null>(null);
   const [reminders, setReminders] = useLocalStorage<Reminder[]>(scoped("reminders"), []);
   const [partyRates, setPartyRates] = useLocalStorage<PartyRate[]>(scoped("party_rates"), []);
   const [backups, setBackups] = useLocalStorage<BackupRecord[]>(scoped("backups"), []);
@@ -4838,6 +5465,52 @@ export default function App({
   });
 
   useEffect(() => dbStore.subscribe(() => setMarketplaceStoreVersion((version) => version + 1)), []);
+
+  useEffect(() => {
+    if (!firebaseUser?.shopId || !firebaseUser.id) {
+      setGstRegistration(null);
+      setGstRegistrationLoading(false);
+      return;
+    }
+    setGstRegistrationLoading(true);
+    try {
+      return subscribeToShopGstRegistration(
+        firebaseUser.shopId,
+        firebaseUser.id,
+        (registration) => {
+          setGstRegistration(registration);
+          setGstRegistrationLoading(false);
+        },
+        (error) => {
+          console.error("Could not read verified shop GST registration:", error);
+          setGstRegistration(null);
+          setGstRegistrationLoading(false);
+        }
+      );
+    } catch (error) {
+      console.error("Could not subscribe to verified shop GST registration:", error);
+      setGstRegistration(null);
+      setGstRegistrationLoading(false);
+    }
+  }, [firebaseUser?.id, firebaseUser?.shopId]);
+
+  useEffect(() => {
+    if (!firebaseUser?.shopId) {
+      setMarketplaceInvoices([]);
+      setMarketplaceCustomers([]);
+      setMarketplaceRecordsError(null);
+      return;
+    }
+    setMarketplaceRecordsError(null);
+    return subscribeToShopMarketplaceRecords(firebaseUser.shopId, {
+      onInvoices: (records) => setMarketplaceInvoices(records.map(toMarketplaceInvoiceRecord)),
+      onCustomers: setMarketplaceCustomers,
+      onError: (error) => {
+        console.error("Could not load marketplace invoices or customers:", error);
+        setMarketplaceRecordsError(`Marketplace records could not be loaded: ${error.message}`);
+      },
+    });
+  }, [firebaseUser?.shopId]);
 
   useEffect(() => {
     if (!activeAccount || !profile.email) return;
@@ -5093,14 +5766,72 @@ export default function App({
   const nextInvoiceNumber = invoices.reduce((max, inv) => Math.max(max, parseInvoiceCounter(inv.id)), 0) + 1;
   const nextInvoiceLabel = formatInvoiceNo(nextInvoiceNumber);
 
-  const saveInvoice = (inv: InvoiceRecord) => {
+  const saveInvoice = async (inv: InvoiceRecord): Promise<boolean> => {
+    let registration: VerifiedGstRegistration | null = null;
+    try {
+      if (firebaseUser?.shopId && firebaseUser.id) {
+        registration = await loadShopGstRegistration(firebaseUser.shopId, firebaseUser.id);
+      }
+      assertInvoiceTypeAllowed(registration, inv.invoiceKind || "regular");
+      if (inv.invoiceKind === "tax" &&
+          (!registration || registration.status !== "regular" || !registration.verified ||
+           !isValidGstin(registration.gstin))) {
+        throw new Error("A current verified regular-scheme GSTIN is required to save a GST Tax Invoice.");
+      }
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Could not validate GST registration. Invoice was not saved.");
+      return false;
+    }
+    const verifiedRegularRegistration =
+      registration?.status === "regular" &&
+      registration.verified &&
+      isValidGstin(registration.gstin)
+        ? registration
+        : null;
+    const invoiceToSave: InvoiceRecord | null = inv.invoiceKind === "tax"
+      ? verifiedRegularRegistration
+        ? {
+            ...inv,
+            supplierGstin: verifiedRegularRegistration.gstin,
+            gstRegistrationStatus: "regular",
+          }
+        : null
+      : {
+          ...inv,
+          ...(verifiedRegularRegistration
+            ? { supplierGstin: verifiedRegularRegistration.gstin }
+            : {}),
+          totalGst: 0,
+          total: Math.max(0, (inv.subtotal ?? inv.total) + (inv.roundOff || 0)),
+          gstRegistrationStatus: registration?.status,
+        };
+
+    if (!invoiceToSave) {
+      alert("A current verified regular-scheme GSTIN is required to save a GST Tax Invoice.");
+      return false;
+    }
     setInvoices((prev) => {
       const exists = prev.some((p) => p.id === inv.id);
-      if (exists) return prev.map((p) => (p.id === inv.id ? inv : p));
-      return [inv, ...prev];
+      if (exists) return prev.map((p) => (p.id === inv.id ? invoiceToSave : p));
+      return [invoiceToSave, ...prev];
     });
+    return true;
   };
 
+  const handleGstRegistrationSubmission = async (
+    gstin: string,
+    scheme: "regular" | "composition"
+  ) => {
+    if (!firebaseUser?.shopId || !firebaseUser.id) {
+      throw new Error("Sign in with the authenticated shopkeeper account before submitting GST registration.");
+    }
+    await submitShopGstRegistration(firebaseUser.shopId, firebaseUser.id, gstin, scheme);
+    setGstRegistration({
+      status: "pending_verification",
+      verified: false,
+      gstin: gstin.trim().toUpperCase(),
+    });
+  };
 
   const localShopId = profile.businessId || "shop_" + (activeBusinessId || "main");
   const localShop: LocalShop = dbStore.getShops().find(
@@ -5142,10 +5873,14 @@ export default function App({
   };
   const shopOrders = dbStore.getOrders({ shopId: localShop.id });
   const shopListings = dbStore.getListings(localShop.id);
+  const combinedInvoices = [
+    ...marketplaceInvoices,
+    ...invoices.filter((invoice) => !marketplaceInvoices.some((marketplace) => marketplace.id === invoice.id)),
+  ];
 
   const renderView = () => {
     switch (tab) {
-      case "dashboard":  return <DashboardView products={products} customers={customers} demands={demands} invoices={invoices} nextInvoiceLabel={nextInvoiceLabel} reminders={reminders} onNavigate={handleNav} />;
+      case "dashboard":  return <DashboardView products={products} customers={customers} demands={demands} invoices={invoices} nextInvoiceLabel={nextInvoiceLabel} reminders={reminders} onNavigate={handleNav} marketplaceOrders={shopOrders} />;
       case "demand":     return <DemandView demands={demands} setDemands={setDemands} customers={customers} />;
       case "inventory":  return <InventoryView products={products} setProducts={setProducts} businessCategory={profile.category} storageKey={scoped("products")} />;
       case "local_dashboard":
@@ -5160,15 +5895,15 @@ export default function App({
         );
       case "local_products":
         return <ShopInventory listings={shopListings} shopId={localShop.id} onRefresh={() => setProducts([...products])} />;
-      case "invoice":    return <InvoiceView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} onNavigate={handleNav} nextInvoiceLabel={nextInvoiceLabel} editInvoice={editingInvoice} onDoneEditing={() => { setEditingInvoiceId(null); handleNav("invoices"); }} partyRates={partyRates} />;
-      case "invoices":   return <InvoicesView invoices={invoices} onDelete={(id) => setInvoices((prev) => prev.filter((inv) => inv.id !== id))} onNavigateInvoice={() => { setEditingInvoiceId(null); handleNav("invoice"); }} onEditInvoice={(id) => { setEditingInvoiceId(id); handleNav("invoice"); }} profile={profile} />;
-      case "cashsale":   return <CashSaleView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} invoices={invoices} devices={paymentDevices} />;
+      case "invoice":    return <InvoiceView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} onNavigate={handleNav} nextInvoiceLabel={nextInvoiceLabel} editInvoice={editingInvoice} onDoneEditing={() => { setEditingInvoiceId(null); handleNav("invoices"); }} partyRates={partyRates} gstRegistration={gstRegistration} gstRegistrationLoading={gstRegistrationLoading} shopId={firebaseUser?.shopId} shopOwnerUid={firebaseUser?.id} />;
+      case "invoices":   return <InvoicesView invoices={combinedInvoices} onDelete={(id) => setInvoices((prev) => prev.filter((inv) => inv.id !== id))} onNavigateInvoice={() => { setEditingInvoiceId(null); handleNav("invoice"); }} onEditInvoice={(id) => { setEditingInvoiceId(id); handleNav("invoice"); }} profile={profile} marketplaceRecordsError={marketplaceRecordsError} />;
+      case "cashsale":   return <CashSaleView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} invoices={invoices} devices={paymentDevices} gstRegistration={gstRegistration} gstRegistrationLoading={gstRegistrationLoading} shopId={firebaseUser?.shopId} shopOwnerUid={firebaseUser?.id} />;
       case "posdevices": return <PaymentDevicesView devices={paymentDevices} setDevices={setPaymentDevices} invoices={invoices} />;
       case "barcode":    return <BarcodeView products={products} />;
       case "ppi":        return <ClosedPPIView cards={ppiCards} setCards={setPpiCards} profile={profile} />;
       case "gst":        return <GSTView profile={profile} />;
-      case "customers":  return <CustomersView customers={customers} setCustomers={setCustomers} profile={profile} />;
-      case "settings":   return <SettingsView settings={settings} setSettings={setSettings} profile={profile} setProfile={setProfile} isAccountEmailLocked={Boolean(sessionUser.email)} />;
+      case "customers":  return <CustomersView customers={customers} setCustomers={setCustomers} profile={profile} marketplaceCustomers={marketplaceCustomers} shopId={localShop.id} marketplaceRecordsError={marketplaceRecordsError} />;
+      case "settings":   return <SettingsView settings={settings} setSettings={setSettings} profile={profile} setProfile={setProfile} isAccountEmailLocked={Boolean(sessionUser.email)} shopId={firebaseUser?.shopId} shopOwnerUid={firebaseUser?.id} gstRegistration={gstRegistration} gstRegistrationLoading={gstRegistrationLoading} onSubmitGstRegistration={handleGstRegistrationSubmission} />;
       case "profile":    return <ProfileView profile={profile} setProfile={setProfile} invoices={invoices} products={products} customers={customers} isAccountEmailLocked={Boolean(sessionUser.email)} />;
       case "reminders":  return <RemindersView reminders={reminders} setReminders={setReminders} />;
       case "rates":      return <PartyRatesView partyRates={partyRates} setPartyRates={setPartyRates} customers={customers} products={products} />;
@@ -5188,7 +5923,7 @@ export default function App({
 
       <aside className={`fixed lg:static inset-y-0 left-0 z-30 w-60 flex flex-col bg-[#0f2557] transition-transform duration-300 ease-out ${sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"} shadow-2xl`}>
         <div className="flex items-center gap-3 px-5 py-5 border-b border-white/10">
-          <div className="w-10 h-10 rounded-full border-2 border-white/70 bg-white p-0.5 shadow-sm shrink-0">
+          <div className="w-11 h-11 rounded-xl bg-white p-0.5 shadow-sm shrink-0">
             <img src={dukanYantraLogo} alt="Dukan Yantra logo" className="w-full h-full rounded-lg object-contain" />
           </div>
           <div>
@@ -5275,5 +6010,15 @@ export default function App({
         </nav>
       </div>
     </div>
+  );
+}
+
+// ─── Entry point: device question + cookies/local-storage + camera permission ─
+export default function App(props: React.ComponentProps<typeof BillingApp>) {
+  return (
+    <>
+      <BillingApp {...props} />
+      <FirstRunSetup />
+    </>
   );
 }
