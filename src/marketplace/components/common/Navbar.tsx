@@ -30,10 +30,10 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
   const unreadNotifCount = notifications.filter((n) => !n.read).length;
 
   return (
-    <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 flex items-center justify-between gap-4 h-16">
+    <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200 pt-[env(safe-area-inset-top)]">
+      <div className="max-w-7xl mx-auto px-3 sm:px-6 flex items-center justify-between gap-2 sm:gap-4 h-16">
         {/* Zone 1: Brand Wordmark & Location Selector */}
-        <div className="flex items-center gap-4 sm:gap-6 shrink-0">
+        <div className="flex items-center gap-1 sm:gap-6 min-w-0 shrink-0">
           <button
             onClick={() => onSelectTab('discover')}
             className="flex items-center gap-2 text-lg md:text-xl font-black tracking-tight text-blue-600 whitespace-nowrap shrink-0 cursor-pointer"
@@ -43,13 +43,13 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
               alt="NearBasket logo"
               className="w-9 h-9 sm:w-10 sm:h-10 object-contain shrink-0"
             />
-            <span>NearBasket</span>
+            <span className="hidden sm:inline">NearBasket</span>
           </button>
 
           {/* Delivery Location Widget (Swiggy-Style) */}
           <button
             onClick={openLocationModal}
-            className="flex items-center gap-1.5 text-xs text-left max-w-[150px] sm:max-w-[240px] px-2 py-1 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer group"
+            className="flex items-center gap-1.5 text-[11px] sm:text-xs text-left max-w-[96px] sm:max-w-[240px] px-1 sm:px-2 py-1 rounded-lg min-h-11 hover:bg-slate-100 transition-colors cursor-pointer group"
             title="Change delivery locality"
           >
             <MapPin className="w-4 h-4 text-blue-600 shrink-0" />
@@ -60,7 +60,7 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
                 </span>
                 <ChevronDown className="w-3.5 h-3.5 text-slate-400 group-hover:text-slate-700 shrink-0" />
               </div>
-              <span className="text-[10px] text-slate-500 truncate block">
+              <span className="text-[10px] text-slate-500 truncate hidden sm:block">
                 {location ? `${location.city} ${location.pincode ? `· ${location.pincode}` : ''}` : 'Choose area'}
               </span>
             </div>
@@ -144,13 +144,13 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
         </nav>
 
         {/* Zone 3: Actions, Sign In / User Account & Shopping Bag */}
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-1 sm:gap-3 shrink-0">
           {/* Notifications (if signed in) */}
           {currentUser && (
             <div className="relative">
               <button
                 onClick={() => setShowNotifications(!showNotifications)}
-                className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors relative cursor-pointer"
+                className="min-h-11 min-w-11 p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors relative cursor-pointer"
                 aria-label="View notifications"
               >
                 <Bell className="w-4 h-4" />
@@ -193,7 +193,7 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
             <div className="flex items-center gap-2">
               <button
                 onClick={() => openAuthModal('login')}
-                className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-lg shadow-xs transition-colors cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-2.5 sm:px-4 py-2 min-h-11 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-lg shadow-xs transition-colors cursor-pointer"
               >
                 <LogIn className="w-3.5 h-3.5" />
                 <span>Sign In</span>
@@ -203,7 +203,7 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
             <div className="relative">
               <button
                 onClick={() => setShowUserDropdown(!showUserDropdown)}
-                className="flex items-center gap-2 px-3 py-1.5 bg-slate-100 hover:bg-slate-200/80 rounded-lg text-xs font-medium text-slate-800 transition-colors cursor-pointer"
+                className="flex items-center gap-2 px-3 py-1.5 min-h-11 bg-slate-100 hover:bg-slate-200/80 rounded-lg text-xs font-medium text-slate-800 transition-colors cursor-pointer"
               >
                 <UserCheck className="w-3.5 h-3.5 text-blue-600" />
                 <div className="text-left hidden sm:block">
@@ -284,7 +284,7 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
           {(!currentUser || currentUser.role === 'customer' || !isApprovedShopkeeper) && (
             <button
               onClick={() => setIsCartDrawerOpen(true)}
-              className="inline-flex items-center gap-2 px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg shadow-sm transition-colors cursor-pointer"
+              className="inline-flex items-center gap-2 px-3.5 py-2 min-h-11 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg shadow-sm transition-colors cursor-pointer"
             >
               <ShoppingBag className="w-4 h-4" />
               <span className="hidden sm:inline font-tabular">

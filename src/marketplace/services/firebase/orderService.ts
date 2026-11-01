@@ -35,6 +35,7 @@ import {
   generateOrderNumber,
 } from '../../utils/formatters';
 import { calculateHaversineDistanceKm } from '../../utils/geo';
+import { adjustMarketplaceCompletedPurchaseAmount } from '../../utils/marketplaceCustomers';
 
 export interface PlaceOrderInput {
   customerId: string;
@@ -246,8 +247,10 @@ export async function transitionFirestoreOrderStatus(
     if (!orderSnapshot.exists()) throw new Error('Order not found in marketplace cloud storage.');
     const order = orderFromFirestore(orderSnapshot.id, orderSnapshot.data() as Record<string, unknown>);
     const invoiceRef = doc(db, 'shops', order.shopId, 'marketplaceInvoices', order.id);
+    const shopCustomerRef = doc(db, 'shops', order.shopId, 'marketplaceCustomers', order.customerId);
     const registrationRef = doc(db, 'shops', order.shopId, 'private', 'gstRegistration');
     const shouldIssueInvoice = targetStatus === 'accepted';
+    const shopCustomerSnapshot = await transaction.get(shopCustomerRef);
     const invoiceSnapshot = shouldIssueInvoice ? await transaction.get(invoiceRef) : null;
     const registrationSnapshot = shouldIssueInvoice ? await transaction.get(registrationRef) : null;
 
@@ -324,6 +327,10 @@ export async function transitionFirestoreOrderStatus(
       updates.paymentStatus = 'refunded';
       updatedOrder = { ...updatedOrder, paymentStatus: 'refunded' };
     }
+    if (targetStatus === 'refunded') {
+      updates.paymentStatus = 'refunded';
+      updatedOrder = { ...updatedOrder, paymentStatus: 'refunded' };
+    }
 
     const restoreStock = actorRole === 'shopkeeper' &&
       (targetStatus === 'cancelled' || targetStatus === 'rejected');
@@ -339,6 +346,20 @@ export async function transitionFirestoreOrderStatus(
     const productSnapshots = await Promise.all(productEntries.map(({ ref }) => transaction.get(ref)));
     if (invoiceDocumentData) transaction.set(invoiceRef, invoiceDocumentData);
     if (Object.keys(updates).length) transaction.update(orderRef, updates);
+    if (shopCustomerSnapshot.exists()) {
+      const currentCompletedAmount = Number(shopCustomerSnapshot.data().completedPurchaseAmount ?? 0);
+      const completedPurchaseAmount = adjustMarketplaceCompletedPurchaseAmount(
+        currentCompletedAmount,
+        order,
+        updatedOrder
+      );
+      if (completedPurchaseAmount !== currentCompletedAmount) {
+        transaction.update(shopCustomerRef, {
+          completedPurchaseAmount,
+          metricsUpdatedOrderId: order.id,
+        });
+      }
+    }
     productSnapshots.forEach((snapshot, index) => {
       if (!snapshot.exists()) return;
       const ref = productEntries[index].ref;
@@ -412,9 +433,10 @@ export async function processAtomicOrder(input: PlaceOrderInput): Promise<OrderP
           txn.get(shopCustomerRef),
         ]);
         const customerProfile = customerProfileSnap.exists() ? customerProfileSnap.data() : {};
-        const canonicalName = String(customerProfile.name || input.customerName || '');
-        const canonicalPhone = String(customerProfile.phone || input.customerPhone || input.deliveryAddress.phoneNumber || '');
-        const canonicalEmail = String(customerProfile.email || auth.currentUser?.email || '');
+        const existingShopCustomer = shopCustomerSnap.exists() ? shopCustomerSnap.data() : {};
+        const canonicalName = String(customerProfile.name || existingShopCustomer.name || input.customerName || '');
+        const canonicalPhone = String(customerProfile.phone || existingShopCustomer.phone || input.customerPhone || input.deliveryAddress.phoneNumber || '');
+        const canonicalEmail = String(customerProfile.email || existingShopCustomer.email || auth.currentUser?.email || '');
         if (shopData.deliverySettings && shopData.deliverySettings.isAcceptingOrders === false) {
           throw new Error('This shop is currently not accepting new orders.');
         }
@@ -566,17 +588,29 @@ export async function processAtomicOrder(input: PlaceOrderInput): Promise<OrderP
         txn.set(orderRef, orderRecord);
         txn.set(shopCustomerRef, {
           customerId: input.customerId,
+          customerAccountId: input.customerId,
+          shopId: input.shopId,
+          shopkeeperId: String(shopData.ownerId || ''),
           ...(canonicalName ? { name: canonicalName } : {}),
           ...(canonicalPhone ? { phone: canonicalPhone } : {}),
           ...(canonicalEmail ? { email: canonicalEmail } : {}),
+          customerRegisteredAt: String(customerProfile.createdAt || existingShopCustomer.customerRegisteredAt || orderRecord.createdAt),
+          source: 'marketplace',
           firstOrderAt: shopCustomerSnap.exists()
             ? shopCustomerSnap.data().firstOrderAt || orderRecord.createdAt
             : orderRecord.createdAt,
           lastOrderAt: orderRecord.createdAt,
           lastOrderId: orderId,
+          lastDeliveryAddress: input.deliveryAddress,
+          deliveryInstructions: input.notes?.trim() || '',
+          totalOrderCount: Number(existingShopCustomer.totalOrderCount ?? 0) + 1,
+          completedPurchaseAmount: Number(existingShopCustomer.completedPurchaseAmount ?? 0),
           createdAt: shopCustomerSnap.exists()
             ? shopCustomerSnap.data().createdAt || orderRecord.createdAt
             : orderRecord.createdAt,
+          ...(existingShopCustomer.metricsUpdatedOrderId
+            ? { metricsUpdatedOrderId: existingShopCustomer.metricsUpdatedOrderId }
+            : {}),
         });
 
         return orderRecord;

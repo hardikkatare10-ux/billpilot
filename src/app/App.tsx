@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import AuthScreen from "./auth";
 import { queuePush, wipeCloudData } from "../lib/cloudSync";
 import dukanYantraLogo from "../icon.png";
@@ -28,7 +28,7 @@ import type { ImportedProduct } from "./inventoryImportParser";
 import { persistImportedInventory } from "./inventoryImportPersistence";
 import { dbStore } from "../marketplace/services/db/store";
 import { createFirestoreProduct } from "../marketplace/services/firebase/productService";
-import type { Shop as LocalShop, Order as LocalOrder, ShopListing as LocalListing } from "../marketplace/types";
+import type { Shop as LocalShop, Order as LocalOrder, ShopListing as LocalListing, UserAddress } from "../marketplace/types";
 import {
   assertInvoiceTypeAllowed,
   getAllowedInvoiceTypes,
@@ -52,6 +52,10 @@ import {
   getCustomerShopOrderPage,
   type CustomerShopOrderCursor,
 } from "../marketplace/services/firebase/orderService";
+import {
+  formatMarketplaceAddress,
+  getMarketplaceMapsUrl,
+} from "../marketplace/utils/marketplaceCustomers";
 
 const env = (import.meta as any).env as { VITE_API_BASE?: string; DEV?: boolean };
 const API_BASE = env.VITE_API_BASE || "/api";
@@ -599,7 +603,7 @@ function AccountAccessScreen({ accounts, onRegister, onActivate, accountEmail, a
 function DashboardView({ products, customers, demands, invoices, nextInvoiceLabel, reminders, onNavigate, marketplaceOrders }: {
   products: Product[]; customers: Customer[]; demands: DemandOrder[]; invoices: InvoiceRecord[]; nextInvoiceLabel: string;
   marketplaceOrders: LocalOrder[];
-  reminders: Reminder[]; onNavigate?: (tab: Tab) => void;
+  reminders: Reminder[]; onNavigate?: (tab: Tab, openForm?: "product" | "customer") => void;
 }) {
   const totalRevenue = invoices.reduce((s, i) => s + i.total, 0);
   const thisMonth = new Date().toISOString().slice(0, 7);
@@ -718,19 +722,19 @@ function DashboardView({ products, customers, demands, invoices, nextInvoiceLabe
           <h3 className="font-semibold text-foreground mb-4">Quick Actions</h3>
           <div className="space-y-2">
             {[
-              { label: "Create Invoice", desc: "Bill a customer", icon: FileText, color: "text-blue-600 bg-blue-50" },
-              { label: "Add Product", desc: "Update inventory", icon: Package, color: "text-emerald-600 bg-emerald-50" },
-              { label: "Add Customer", desc: "Save contact", icon: Users, color: "text-purple-600 bg-purple-50" },
-              { label: "File GST", desc: "Go to GST portal", icon: Building2, color: "text-amber-600 bg-amber-50" },
+              { label: "Create Invoice", desc: "Bill a customer", icon: FileText, color: "text-blue-600 bg-blue-50", tab: "invoice" as const },
+              { label: "Add Product", desc: "Update inventory", icon: Package, color: "text-emerald-600 bg-emerald-50", tab: "inventory" as const, openForm: "product" as const },
+              { label: "Add Customer", desc: "Save contact", icon: Users, color: "text-purple-600 bg-purple-50", tab: "customers" as const, openForm: "customer" as const },
+              { label: "File GST", desc: "Go to GST portal", icon: Building2, color: "text-amber-600 bg-amber-50", tab: "gst" as const },
             ].map((a) => (
-              <div key={a.label} className="flex items-center gap-3 p-3 rounded-xl hover:bg-muted/40 cursor-pointer transition-colors border border-transparent hover:border-border">
+              <button key={a.label} type="button" onClick={() => onNavigate?.(a.tab, a.openForm)} className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-muted/40 text-left cursor-pointer transition-colors border border-transparent hover:border-border">
                 <span className={`p-2 rounded-lg ${a.color}`}><a.icon className="w-4 h-4" /></span>
                 <div>
                   <p className="text-sm font-medium text-foreground">{a.label}</p>
                   <p className="text-xs text-muted-foreground">{a.desc}</p>
                 </div>
                 <ChevronRight className="w-4 h-4 text-muted-foreground ml-auto" />
-              </div>
+              </button>
             ))}
           </div>
         </div>
@@ -875,7 +879,14 @@ function DemandView({ demands, setDemands, customers }: { demands: DemandOrder[]
 }
 
 // ─── Inventory ────────────────────────────────────────────────────────────────
-function InventoryView({ products, setProducts, businessCategory, storageKey }: { products: Product[]; setProducts: (v: Product[] | ((p: Product[]) => Product[])) => void; businessCategory: string; storageKey: string; }) {
+function InventoryView({ products, setProducts, businessCategory, storageKey, openAddForm = false, onQuickActionHandled }: {
+  products: Product[];
+  setProducts: (v: Product[] | ((p: Product[]) => Product[])) => void;
+  businessCategory: string;
+  storageKey: string;
+  openAddForm?: boolean;
+  onQuickActionHandled?: () => void;
+}) {
   const [search, setSearch] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -887,6 +898,12 @@ function InventoryView({ products, setProducts, businessCategory, storageKey }: 
 
   const openAdd = () => { setForm({ name: "", sku: "", barcode: "", price: "", costPrice: "", stock: "", unit: "Packet", category: businessCategory }); setEditId(null); setShowForm(true); };
   const openEdit = (p: Product) => { setForm({ name: p.name, sku: p.sku, barcode: p.barcode, price: String(p.price), costPrice: String(p.costPrice), stock: String(p.stock), unit: p.unit, category: p.category }); setEditId(p.id); setShowForm(true); };
+
+  useEffect(() => {
+    if (!openAddForm) return;
+    openAdd();
+    onQuickActionHandled?.();
+  }, [openAddForm, onQuickActionHandled]);
 
   const emptyInventory = () => {
     if (!products.length) {
@@ -4273,13 +4290,15 @@ function GSTView({ profile }: { profile: Profile }) {
 }
 
 // ─── Customers ────────────────────────────────────────────────────────────────
-function CustomersView({ customers, setCustomers, profile, marketplaceCustomers, shopId, marketplaceRecordsError }: {
+function CustomersView({ customers, setCustomers, profile, marketplaceCustomers, shopId, marketplaceRecordsError, openAddForm = false, onQuickActionHandled }: {
   customers: Customer[];
   setCustomers: (v: Customer[] | ((p: Customer[]) => Customer[])) => void;
   profile: Profile;
   marketplaceCustomers: MarketplaceCustomerRecord[];
   shopId: string;
   marketplaceRecordsError?: string | null;
+  openAddForm?: boolean;
+  onQuickActionHandled?: () => void;
 }) {
   const [search, setSearch] = useState("");
   const [showAdd, setShowAdd] = useState(false);
@@ -4298,6 +4317,12 @@ function CustomersView({ customers, setCustomers, profile, marketplaceCustomers,
     (c.email || "").toLowerCase().includes(search.toLowerCase())
   );
   const selectedCustomerOrders = historyOrders;
+
+  useEffect(() => {
+    if (!openAddForm) return;
+    setShowAdd(true);
+    onQuickActionHandled?.();
+  }, [openAddForm, onQuickActionHandled]);
 
   useEffect(() => {
     if (!orderHistoryCustomerId) {
@@ -4445,6 +4470,34 @@ function CustomersView({ customers, setCustomers, profile, marketplaceCustomers,
                   <p className="font-semibold text-sm text-foreground mt-3">{customer.name || "Marketplace customer"}</p>
                   {customer.phone && <p className="text-xs text-muted-foreground mt-1">{customer.phone}</p>}
                   {customer.email && <p className="text-xs text-muted-foreground mt-1">{customer.email}</p>}
+                  {customer.lastDeliveryAddress && (
+                    <div className="mt-2 text-xs text-muted-foreground">
+                      <p className="flex items-start gap-1">
+                        <MapPin className="w-3 h-3 mt-0.5 shrink-0" />
+                        <span>{formatMarketplaceAddress(customer.lastDeliveryAddress)}</span>
+                      </p>
+                      {customer.deliveryInstructions && <p className="mt-1">Delivery instructions: {customer.deliveryInstructions}</p>}
+                      {getMarketplaceMapsUrl(customer.lastDeliveryAddress) && (
+                        <a
+                          href={getMarketplaceMapsUrl(customer.lastDeliveryAddress)!}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(event) => event.stopPropagation()}
+                          className="inline-flex items-center gap-1 mt-1 text-primary font-medium hover:underline"
+                        >
+                          <MapPin className="w-3 h-3" /> Open in Google Maps
+                        </a>
+                      )}
+                    </div>
+                  )}
+                  <p className="text-xs text-muted-foreground mt-2">
+                    {customer.totalOrderCount ?? 0} order{customer.totalOrderCount === 1 ? "" : "s"} · Completed purchases {fmt((customer.completedPurchaseAmount ?? 0) / 100)}
+                  </p>
+                  {customer.customerRegisteredAt && (
+                    <p className="text-[11px] text-muted-foreground mt-1">
+                      Customer since {new Date(customer.customerRegisteredAt).toLocaleDateString("en-IN")}
+                    </p>
+                  )}
                   <button
                     onClick={() => setOrderHistoryCustomerId(customer.customerId)}
                     className="mt-3 w-full px-3 py-2 bg-primary/5 text-primary border border-primary/20 rounded-lg text-xs font-semibold hover:bg-primary/10"
@@ -4491,6 +4544,13 @@ function CustomersView({ customers, setCustomers, profile, marketplaceCustomers,
                 <p className="text-xs text-muted-foreground">{new Date(order.createdAt).toLocaleString("en-IN")}</p>
                 <p className="text-xs">{order.items.map((item) => `${item.productName} × ${item.quantity} (${fmt(item.unitPrice / 100)})`).join(", ")}</p>
                 <p className="text-xs">Total: <strong>{fmt(order.totalAmount / 100)}</strong> · Payment: {order.paymentMethod.replace(/_/g, " ")} ({order.paymentStatus})</p>
+                <p className="text-xs text-muted-foreground">
+                  Delivery address: {formatMarketplaceAddress(order.deliveryAddress)}
+                  {getMarketplaceMapsUrl(order.deliveryAddress) && (
+                    <> · <a href={getMarketplaceMapsUrl(order.deliveryAddress)!} target="_blank" rel="noopener noreferrer" className="text-primary font-medium hover:underline">Open in Google Maps</a></>
+                  )}
+                </p>
+                {order.delivery.notes && <p className="text-xs text-muted-foreground">Delivery instructions: {order.delivery.notes}</p>}
                 <div className="flex justify-between items-center">
                   {order.invoice && <span className="text-xs text-muted-foreground">Invoice: {order.invoice.invoiceNumber}</span>}
                   {order.invoice && (
@@ -5608,6 +5668,7 @@ function BillingApp({
   );
   const [tab, setTab] = useState<Tab>(initialTab);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [pendingQuickAction, setPendingQuickAction] = useState<"product" | "customer" | null>(null);
   const [editingInvoiceId, setEditingInvoiceId] = useState<string | null>(null);
   const editingInvoice = invoices.find((inv) => inv.id === editingInvoiceId) || null;
 
@@ -5619,6 +5680,12 @@ function BillingApp({
     setTab(t);
     if (onTabChange) onTabChange(t);
     setSidebarOpen(false);
+  };
+
+  const clearPendingQuickAction = useCallback(() => setPendingQuickAction(null), []);
+  const handleDashboardQuickAction = (target: Tab, openForm?: "product" | "customer") => {
+    setPendingQuickAction(openForm || null);
+    handleNav(target);
   };
 
   useEffect(() => {
@@ -5880,9 +5947,9 @@ function BillingApp({
 
   const renderView = () => {
     switch (tab) {
-      case "dashboard":  return <DashboardView products={products} customers={customers} demands={demands} invoices={invoices} nextInvoiceLabel={nextInvoiceLabel} reminders={reminders} onNavigate={handleNav} marketplaceOrders={shopOrders} />;
+      case "dashboard":  return <DashboardView products={products} customers={customers} demands={demands} invoices={invoices} nextInvoiceLabel={nextInvoiceLabel} reminders={reminders} onNavigate={handleDashboardQuickAction} marketplaceOrders={shopOrders} />;
       case "demand":     return <DemandView demands={demands} setDemands={setDemands} customers={customers} />;
-      case "inventory":  return <InventoryView products={products} setProducts={setProducts} businessCategory={profile.category} storageKey={scoped("products")} />;
+      case "inventory":  return <InventoryView products={products} setProducts={setProducts} businessCategory={profile.category} storageKey={scoped("products")} openAddForm={pendingQuickAction === "product"} onQuickActionHandled={clearPendingQuickAction} />;
       case "local_dashboard":
       case "local_orders":
         return (
@@ -5902,7 +5969,7 @@ function BillingApp({
       case "barcode":    return <BarcodeView products={products} />;
       case "ppi":        return <ClosedPPIView cards={ppiCards} setCards={setPpiCards} profile={profile} />;
       case "gst":        return <GSTView profile={profile} />;
-      case "customers":  return <CustomersView customers={customers} setCustomers={setCustomers} profile={profile} marketplaceCustomers={marketplaceCustomers} shopId={localShop.id} marketplaceRecordsError={marketplaceRecordsError} />;
+      case "customers":  return <CustomersView customers={customers} setCustomers={setCustomers} profile={profile} marketplaceCustomers={marketplaceCustomers} shopId={localShop.id} marketplaceRecordsError={marketplaceRecordsError} openAddForm={pendingQuickAction === "customer"} onQuickActionHandled={clearPendingQuickAction} />;
       case "settings":   return <SettingsView settings={settings} setSettings={setSettings} profile={profile} setProfile={setProfile} isAccountEmailLocked={Boolean(sessionUser.email)} shopId={firebaseUser?.shopId} shopOwnerUid={firebaseUser?.id} gstRegistration={gstRegistration} gstRegistrationLoading={gstRegistrationLoading} onSubmitGstRegistration={handleGstRegistrationSubmission} />;
       case "profile":    return <ProfileView profile={profile} setProfile={setProfile} invoices={invoices} products={products} customers={customers} isAccountEmailLocked={Boolean(sessionUser.email)} />;
       case "reminders":  return <RemindersView reminders={reminders} setReminders={setReminders} />;
@@ -5918,10 +5985,10 @@ function BillingApp({
   );
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
+    <div className="flex h-full min-h-0 overflow-hidden bg-background">
       {sidebarOpen && <div className="fixed inset-0 bg-black/40 z-20 lg:hidden" onClick={() => setSidebarOpen(false)} />}
 
-      <aside className={`fixed lg:static inset-y-0 left-0 z-30 w-60 flex flex-col bg-[#0f2557] transition-transform duration-300 ease-out ${sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"} shadow-2xl`}>
+      <aside className={`fixed lg:static inset-y-0 left-0 z-30 w-60 flex flex-col bg-[#0f2557] pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] transition-transform duration-300 ease-out ${sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"} shadow-2xl`}>
         <div className="flex items-center gap-3 px-5 py-5 border-b border-white/10">
           <div className="w-11 h-11 rounded-xl bg-white p-0.5 shadow-sm shrink-0">
             <img src={dukanYantraLogo} alt="Dukan Yantra logo" className="w-full h-full rounded-lg object-contain" />
@@ -5958,7 +6025,7 @@ function BillingApp({
 
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <header className="flex items-center gap-3 px-4 py-3 bg-card border-b border-border shrink-0 shadow-sm">
-          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 rounded-lg lg:hidden text-muted-foreground hover:bg-muted transition-colors">
+          <button onClick={() => setSidebarOpen(!sidebarOpen)} aria-label={sidebarOpen ? "Close navigation menu" : "Open navigation menu"} className="min-h-11 min-w-11 p-2 rounded-lg lg:hidden text-muted-foreground hover:bg-muted transition-colors">
             <Menu className="w-5 h-5" />
           </button>
           <h1 className="font-semibold text-foreground">{TITLES[tab]}</h1>
@@ -5985,7 +6052,7 @@ function BillingApp({
               <span className="hidden md:inline">Switch account</span>
             </button>
             <button onClick={() => handleNav("profile")}
-              className="w-8 h-8 rounded-full bg-primary flex items-center justify-center text-primary-foreground text-sm font-bold cursor-pointer hover:bg-primary/90 transition-colors">
+              className="w-10 h-10 sm:w-8 sm:h-8 rounded-full bg-primary flex items-center justify-center text-primary-foreground text-sm font-bold cursor-pointer hover:bg-primary/90 transition-colors">
               {profile.shopName.charAt(0).toUpperCase()}
             </button>
           </div>
@@ -5995,7 +6062,7 @@ function BillingApp({
           {renderView()}
         </main>
 
-        <nav className="lg:hidden flex items-center border-t border-border bg-card px-1 py-1 shrink-0">
+        <nav aria-label="Main navigation" className="lg:hidden flex items-center border-t border-border bg-card px-1 pt-1 pb-[env(safe-area-inset-bottom)] shrink-0">
           {mobileNav.map(({ id, label, icon: Icon }) => (
             <button key={id} onClick={() => handleNav(id)}
               className={`flex-1 flex flex-col items-center gap-0.5 py-2 rounded-lg text-[10px] font-medium transition-colors ${tab === id ? "text-primary" : "text-muted-foreground"}`}>

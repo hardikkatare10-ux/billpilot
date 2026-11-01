@@ -370,37 +370,38 @@ const MainAppContent: React.FC = () => {
     const initialShopTab = pathToShopkeeperTab(currentRoute);
 
     return (
-      <div className="h-screen w-screen overflow-hidden flex flex-col bg-slate-50">
+      <div className="app-viewport w-full overflow-hidden flex flex-col bg-slate-50 pt-[env(safe-area-inset-top)]">
         {orderSyncError && (
           <div role="alert" className="shrink-0 bg-rose-50 border-b border-rose-200 px-4 py-2 text-xs text-rose-800">
             {orderSyncError}
           </div>
         )}
         {/* Top Banner indicating Approved Shopkeeper Persona & quick switch */}
-        <div className="bg-[#0b1b3d] text-white px-4 py-1.5 text-xs flex items-center justify-between shrink-0 border-b border-white/10">
-          <div className="flex items-center gap-2">
+        <div className="bg-[#0b1b3d] text-white px-4 py-1.5 text-xs flex items-center justify-between gap-3 shrink-0 border-b border-white/10">
+          <div className="flex items-center gap-2 min-w-0">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            <span className="font-medium text-blue-200">
+            <span className="font-medium text-blue-200 truncate">
               Merchant Suite · <strong className="text-white">{currentUser.shopName || 'Verified Merchant'}</strong>
             </span>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 shrink-0">
             <button
               onClick={() => {
                 setActiveMode('consumer');
                 navigate('/consumer');
               }}
-              className="text-xs text-blue-300 hover:text-white flex items-center gap-1 transition-colors cursor-pointer"
+              className="text-xs text-blue-300 hover:text-white flex items-center gap-1 transition-colors cursor-pointer min-h-11"
+              aria-label="Preview customer marketplace"
             >
               <Store className="w-3.5 h-3.5 text-blue-400" />
-              <span>Preview Customer Marketplace</span>
+              <span className="hidden sm:inline">Preview Customer Marketplace</span>
               <ArrowRight className="w-3 h-3" />
             </button>
           </div>
         </div>
 
         {/* Dukan Yantra shopkeeper ERP */}
-        <div className="flex-1 overflow-hidden">
+        <div className="flex-1 min-h-0 overflow-hidden">
           <App
             firebaseUser={{
               id: currentUser.id,

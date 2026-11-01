@@ -1,5 +1,6 @@
 import { collection, onSnapshot, type Unsubscribe } from 'firebase/firestore';
 import { db, isFirebaseConfigured } from '../../../lib/firebase';
+import type { UserAddress } from '../../types';
 
 export interface MarketplaceInvoiceDocument {
   id: string;
@@ -42,12 +43,21 @@ export interface MarketplaceInvoiceDocument {
 
 export interface MarketplaceCustomerRecord {
   customerId: string;
+  customerAccountId?: string;
+  shopId?: string;
+  shopkeeperId?: string;
   name?: string;
   phone?: string;
   email?: string;
+  customerRegisteredAt?: string;
+  source?: 'marketplace';
   firstOrderAt: string;
   lastOrderAt: string;
   lastOrderId: string;
+  lastDeliveryAddress?: UserAddress;
+  deliveryInstructions?: string;
+  totalOrderCount?: number;
+  completedPurchaseAmount?: number;
 }
 
 export function subscribeToShopMarketplaceRecords(

@@ -20,6 +20,7 @@ export interface UserAddress {
   locality: string;
   landmark?: string;
   city: string;
+  state?: string;
   pincode: string;
   coordinates?: {
     latitude: number;

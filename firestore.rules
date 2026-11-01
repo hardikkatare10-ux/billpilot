@@ -431,9 +431,63 @@ service cloud.firestore {
       match /marketplaceCustomers/{customerId} {
         function linkedOrderAfterWrite() {
           let orderPath = /databases/$(database)/documents/orders/$(incoming().lastOrderId);
-          return existsAfter(orderPath)
+          let customerPath = /databases/$(database)/documents/users/$(customerId);
+          return incoming().lastOrderId is string
+            && !exists(orderPath)
+            && existsAfter(orderPath)
             && getAfter(orderPath).data.shopId == shopId
-            && getAfter(orderPath).data.customerId == customerId;
+            && getAfter(orderPath).data.customerId == customerId
+            && incoming().shopkeeperId == getAfter(
+              /databases/$(database)/documents/shops/$(shopId)
+            ).data.ownerId
+            && incoming().customerId == customerId
+            && incoming().customerAccountId == customerId
+            && incoming().shopId == shopId
+            && incoming().source == 'marketplace'
+            && incoming().lastOrderAt == getAfter(orderPath).data.createdAt
+            && incoming().lastDeliveryAddress == getAfter(orderPath).data.deliveryAddress
+            && incoming().totalOrderCount is number
+            && incoming().completedPurchaseAmount is number
+            && incoming().completedPurchaseAmount >= 0
+            && exists(customerPath)
+            && (
+              (
+                get(customerPath).data.keys().hasAny(['createdAt'])
+                && incoming().customerRegisteredAt == get(customerPath).data.createdAt
+              )
+              || (
+                !get(customerPath).data.keys().hasAny(['createdAt'])
+                && incoming().customerRegisteredAt == getAfter(orderPath).data.createdAt
+              )
+            )
+            && (!incoming().keys().hasAny(['name']) || incoming().name == getAfter(orderPath).data.customerName)
+            && (!incoming().keys().hasAny(['phone']) || incoming().phone == getAfter(orderPath).data.customerPhone)
+            && (!incoming().keys().hasAny(['email']) || incoming().email == getAfter(orderPath).data.customerEmail);
+        }
+
+        function completedPurchase(orderData) {
+          return orderData.paymentStatus == 'completed'
+            && !(orderData.status in ['cancelled', 'rejected', 'refunded']);
+        }
+
+        function validPurchaseMetricsUpdate() {
+          let orderPath = /databases/$(database)/documents/orders/$(incoming().metricsUpdatedOrderId);
+          let previousOrder = get(orderPath).data;
+          let updatedOrder = getAfter(orderPath).data;
+          let previousAmount = existing().get('completedPurchaseAmount', 0);
+          let orderAmountAdded = completedPurchase(updatedOrder) ? updatedOrder.totalAmount : 0;
+          let orderAmountRemoved = completedPurchase(previousOrder) ? previousOrder.totalAmount : 0;
+          let expectedAmount = previousAmount + orderAmountAdded - orderAmountRemoved;
+          return incoming().metricsUpdatedOrderId is string
+            && exists(orderPath)
+            && existsAfter(orderPath)
+            && updatedOrder.shopId == shopId
+            && updatedOrder.customerId == customerId
+            && incoming().customerId == customerId
+            && incoming().completedPurchaseAmount == (expectedAmount < 0 ? 0 : expectedAmount)
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'completedPurchaseAmount', 'metricsUpdatedOrderId'
+            ]);
         }
 
         allow get: if isAdmin() || isShopOwner(shopId) ||
@@ -442,38 +496,37 @@ service cloud.firestore {
         allow create: if isSignedIn()
           && request.auth.uid == customerId
           && incoming().keys().hasOnly([
-            'customerId', 'name', 'phone', 'email', 'firstOrderAt',
-            'lastOrderAt', 'lastOrderId', 'createdAt'
+            'customerId', 'customerAccountId', 'shopId', 'shopkeeperId', 'name', 'phone', 'email',
+            'customerRegisteredAt', 'source', 'firstOrderAt', 'lastOrderAt',
+            'lastOrderId', 'lastDeliveryAddress', 'deliveryInstructions',
+            'totalOrderCount', 'completedPurchaseAmount', 'createdAt', 'metricsUpdatedOrderId'
           ])
-          && incoming().customerId == customerId
+          && incoming().totalOrderCount == 1
+          && incoming().completedPurchaseAmount == 0
           && linkedOrderAfterWrite()
-          && (!incoming().keys().hasAny(['name']) || incoming().name == getAfter(
-            /databases/$(database)/documents/orders/$(incoming().lastOrderId)
-          ).data.customerName)
-          && (!incoming().keys().hasAny(['phone']) || incoming().phone == getAfter(
-            /databases/$(database)/documents/orders/$(incoming().lastOrderId)
-          ).data.customerPhone)
-          && (!incoming().keys().hasAny(['email']) || incoming().email == getAfter(
-            /databases/$(database)/documents/orders/$(incoming().lastOrderId)
-          ).data.customerEmail);
+          && incoming().firstOrderAt == incoming().lastOrderAt;
         allow update: if isSignedIn()
-          && request.auth.uid == customerId
-          && incoming().keys().hasOnly([
-            'customerId', 'name', 'phone', 'email', 'firstOrderAt',
-            'lastOrderAt', 'lastOrderId', 'createdAt'
-          ])
-          && existing().customerId == customerId
-          && incoming().customerId == customerId
-          && linkedOrderAfterWrite()
-          && (!incoming().keys().hasAny(['name']) || incoming().name == getAfter(
-            /databases/$(database)/documents/orders/$(incoming().lastOrderId)
-          ).data.customerName)
-          && (!incoming().keys().hasAny(['phone']) || incoming().phone == getAfter(
-            /databases/$(database)/documents/orders/$(incoming().lastOrderId)
-          ).data.customerPhone)
-          && (!incoming().keys().hasAny(['email']) || incoming().email == getAfter(
-            /databases/$(database)/documents/orders/$(incoming().lastOrderId)
-          ).data.customerEmail);
+          && (
+            (
+              request.auth.uid == customerId
+              && incoming().keys().hasOnly([
+                'customerId', 'customerAccountId', 'shopId', 'shopkeeperId', 'name', 'phone', 'email',
+                'customerRegisteredAt', 'source', 'firstOrderAt', 'lastOrderAt',
+                'lastOrderId', 'lastDeliveryAddress', 'deliveryInstructions',
+                'totalOrderCount', 'completedPurchaseAmount', 'createdAt', 'metricsUpdatedOrderId'
+              ])
+              && existing().customerId == customerId
+              && incoming().totalOrderCount == existing().get('totalOrderCount', 0) + 1
+              && incoming().completedPurchaseAmount == existing().get('completedPurchaseAmount', 0)
+              && incoming().firstOrderAt == existing().firstOrderAt
+              && incoming().createdAt == existing().createdAt
+              && linkedOrderAfterWrite()
+            )
+            || (
+              (isAdmin() || isShopOwner(shopId) || request.auth.uid == customerId)
+              && validPurchaseMetricsUpdate()
+            )
+          );
         allow delete: if false;
       }
     }

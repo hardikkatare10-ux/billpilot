@@ -132,7 +132,13 @@
   }
 
   html {
+    height: 100%;
     font-size: var(--font-size);
+  }
+
+  body,
+  #root {
+    min-height: 100%;
   }
 
   h1 { font-size: var(--text-2xl); font-weight: var(--font-weight-medium); line-height: 1.4; }
@@ -142,4 +148,17 @@
   label { font-size: var(--text-sm); font-weight: var(--font-weight-medium); line-height: 1.5; }
   button { font-size: var(--text-sm); font-weight: var(--font-weight-medium); line-height: 1.5; }
   input { font-size: var(--text-sm); font-weight: var(--font-weight-normal); line-height: 1.5; }
+}
+
+.app-viewport {
+  height: 100vh;
+  height: 100dvh;
+}
+
+@media (max-width: 767px) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
 }
