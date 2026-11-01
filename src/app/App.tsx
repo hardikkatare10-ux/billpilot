@@ -26,6 +26,11 @@ import { InvoiceModal } from "../marketplace/components/common/InvoiceModal";
 import { InventoryImport } from "./InventoryImport";
 import type { ImportedProduct } from "./inventoryImportParser";
 import { persistImportedInventory } from "./inventoryImportPersistence";
+import {
+  calculateReturnRefundAmount,
+  getRemainingReturnQuantity,
+  type CashSaleReturnRecord,
+} from "./cashSaleReturns";
 import { dbStore } from "../marketplace/services/db/store";
 import { createFirestoreProduct } from "../marketplace/services/firebase/productService";
 import type { Shop as LocalShop, Order as LocalOrder, ShopListing as LocalListing, UserAddress } from "../marketplace/types";
@@ -2257,10 +2262,12 @@ function InvoicesView({ invoices, onDelete, onNavigateInvoice, onEditInvoice, pr
 
 // ─── Barcode ──────────────────────────────────────────────────────────────────
 // ─── Cash Sale POS Billing ─────────────────────────────────────────────────────
-function CashSaleView({ products, customers, profile, settings, onSave, invoices, devices, gstRegistration, gstRegistrationLoading, shopId, shopOwnerUid }: {
+function CashSaleView({ products, customers, profile, settings, onSave, onProcessReturn, invoices, returns, devices, gstRegistration, gstRegistrationLoading, shopId, shopOwnerUid }: {
   products: Product[]; customers: Customer[]; profile: Profile; settings: AppSettings;
   onSave: (inv: InvoiceRecord) => Promise<boolean> | boolean;
+  onProcessReturn: (record: CashSaleReturnRecord) => void;
   invoices: InvoiceRecord[];
+  returns: CashSaleReturnRecord[];
   devices: PaymentDevice[];
   gstRegistration: VerifiedGstRegistration | null;
   gstRegistrationLoading: boolean;
@@ -2296,6 +2303,18 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
 
   const [heldInvoices, setHeldInvoices] = useLocalStorage<HeldInvoice[]>("billpro_held_invoices_pos", []);
   const [savedFlash, setSavedFlash] = useState(false);
+  const [showReturnDialog, setShowReturnDialog] = useState(false);
+  const [returnSearch, setReturnSearch] = useState("");
+  const [selectedReturnSaleId, setSelectedReturnSaleId] = useState("");
+  const [selectedReturnProductId, setSelectedReturnProductId] = useState("");
+  const [returnQuantity, setReturnQuantity] = useState("1");
+  const [returnReason, setReturnReason] = useState("Customer changed mind");
+  const [returnCondition, setReturnCondition] = useState<"resalable" | "damaged">("resalable");
+  const [returnMethod, setReturnMethod] = useState<"cash" | "store_credit" | "external">("cash");
+  const [returnError, setReturnError] = useState("");
+  const [returnNotice, setReturnNotice] = useState("");
+  const [processingReturn, setProcessingReturn] = useState(false);
+  const returnInProgress = useRef(false);
 
   const cellRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const barcodeInputRef = useRef<HTMLInputElement | null>(null);
@@ -2470,6 +2489,73 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
     setPosStatus("idle");
     setPosTxnId("");
     setSelectedProviderId(connectedDevices[0]?.id || "");
+  };
+
+  const matchingReturnSales = invoices.filter((invoice) => {
+    if (invoice.source !== "pos" || !invoice.items?.some((item) => item.productId > 0)) return false;
+    const query = returnSearch.trim().toLowerCase();
+    return !query || [invoice.id, invoice.txnRef, invoice.posTxnId]
+      .some((value) => value?.toLowerCase().includes(query));
+  });
+  const selectedReturnSale = matchingReturnSales.find((invoice) => invoice.id === selectedReturnSaleId);
+  const returnableProducts = selectedReturnSale?.items
+    ? Array.from(selectedReturnSale.items.reduce((items, item) => {
+        if (item.productId > 0) {
+          const current = items.get(item.productId);
+          items.set(item.productId, {
+            productId: item.productId,
+            name: current?.name || item.name,
+          });
+        }
+        return items;
+      }, new Map<number, { productId: number; name: string }>()))
+        .map(([, item]) => ({
+          ...item,
+          remaining: getRemainingReturnQuantity(selectedReturnSale, item.productId, returns),
+        }))
+        .filter((item) => item.remaining > 0)
+    : [];
+  const selectedReturnProduct = returnableProducts.find((item) => item.productId === Number(selectedReturnProductId));
+  const returnQuantityNumber = Number(returnQuantity);
+  const returnRefundAmount = selectedReturnSale && selectedReturnProduct &&
+    Number.isInteger(returnQuantityNumber) && returnQuantityNumber > 0 &&
+    returnQuantityNumber <= selectedReturnProduct.remaining
+    ? calculateReturnRefundAmount(selectedReturnSale, selectedReturnProduct.productId, returnQuantityNumber)
+    : 0;
+
+  const handleProcessReturn = () => {
+    if (returnInProgress.current) return;
+    if (!selectedReturnSale || !selectedReturnProduct || !returnReason.trim() ||
+        !Number.isInteger(returnQuantityNumber) || returnQuantityNumber < 1 ||
+        returnQuantityNumber > selectedReturnProduct.remaining || returnRefundAmount <= 0) {
+      setReturnError("Choose a valid cash sale, item, and quantity before recording the return.");
+      return;
+    }
+
+    returnInProgress.current = true;
+    setProcessingReturn(true);
+    setReturnError("");
+    try {
+      onProcessReturn({
+        id: `return_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+        saleId: selectedReturnSale.id,
+        productId: selectedReturnProduct.productId,
+        productName: selectedReturnProduct.name,
+        quantity: returnQuantityNumber,
+        refundAmount: returnRefundAmount,
+        reason: returnReason,
+        condition: returnCondition,
+        refundMethod: returnMethod,
+        createdAt: new Date().toISOString(),
+      });
+      setShowReturnDialog(false);
+      setReturnNotice(`Return recorded for ${selectedReturnProduct.name}.`);
+    } catch (error) {
+      setReturnError(error instanceof Error ? error.message : "The return could not be recorded.");
+    } finally {
+      returnInProgress.current = false;
+      setProcessingReturn(false);
+    }
   };
 
   const formatCashSaleId = (date: string) => {
@@ -2659,6 +2745,12 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
         {savedFlash && <span className="text-xs font-semibold text-emerald-600 flex items-center gap-1"><Check className="w-3.5 h-3.5" /> Saved!</span>}
         <div className="ml-auto flex items-center gap-2">
           {scanNote && <span className="text-xs text-muted-foreground max-w-[200px] truncate">{scanNote}</span>}
+          {returnNotice && <span role="status" className="text-xs text-emerald-700">{returnNotice}</span>}
+          <button onClick={() => { setShowReturnDialog(true); setReturnError(""); setReturnNotice(""); }}
+            aria-label="Return Product"
+            className="text-xs px-2 sm:px-3 py-1.5 border border-primary/30 text-primary rounded-lg hover:bg-primary/5 transition-colors flex items-center gap-1.5 whitespace-nowrap">
+            <RotateCcw className="w-3.5 h-3.5" /> <span className="hidden sm:inline">Return Product</span>
+          </button>
           <CameraScanButton label="Scan" title="Scan items with camera" keepOpen onDetected={handleExternalScan} className="text-xs px-3 py-1.5 border border-border rounded-lg text-muted-foreground hover:bg-muted transition-colors flex items-center gap-1.5" />
           <button onClick={handleHold} className="text-xs px-3 py-1.5 border border-border rounded-lg text-muted-foreground hover:bg-muted transition-colors flex items-center gap-1.5">
             <Clock className="w-3.5 h-3.5" /> Hold
@@ -2667,6 +2759,114 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
           <button onClick={handleCancel} className="text-xs px-3 py-1.5 border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors">Cancel</button>
         </div>
       </div>
+
+      {showReturnDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" aria-labelledby="cash-sale-return-title">
+          <div className="w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-2xl bg-card shadow-2xl border border-border">
+            <div className="flex items-center justify-between border-b border-border p-4">
+              <div>
+                <h2 id="cash-sale-return-title" className="font-semibold text-foreground">Return Product</h2>
+                <p className="text-xs text-muted-foreground mt-1">Find a Cash Sale receipt to record a full or partial return.</p>
+              </div>
+              <button onClick={() => setShowReturnDialog(false)} aria-label="Close return dialog" className="p-2 rounded-lg hover:bg-muted"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="space-y-4 p-4">
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">Search receipt or transaction ID</label>
+                <input value={returnSearch} onChange={(event) => { setReturnSearch(event.target.value); setSelectedReturnSaleId(""); setSelectedReturnProductId(""); }}
+                  placeholder="Cash Sale Invoice or transaction reference"
+                  className="w-full px-3 py-2.5 bg-background border border-border rounded-lg text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">Cash Sale receipt</label>
+                <select value={selectedReturnSaleId} onChange={(event) => { setSelectedReturnSaleId(event.target.value); setSelectedReturnProductId(""); }}
+                  className="w-full px-3 py-2.5 bg-background border border-border rounded-lg text-sm">
+                  <option value="">Select a receipt ({matchingReturnSales.length} found)</option>
+                  {matchingReturnSales.map((sale) => (
+                    <option key={sale.id} value={sale.id}>{sale.id} · {sale.date} · {fmt(sale.total)}</option>
+                  ))}
+                </select>
+                {matchingReturnSales.length === 0 && <p className="mt-1 text-xs text-muted-foreground">No matching Cash Sale receipts with registered products.</p>}
+              </div>
+              {selectedReturnSale && (
+                <>
+                  <div>
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">Product and remaining quantity</label>
+                    <select value={selectedReturnProductId} onChange={(event) => { setSelectedReturnProductId(event.target.value); setReturnQuantity("1"); }}
+                      className="w-full px-3 py-2.5 bg-background border border-border rounded-lg text-sm">
+                      <option value="">Select a product</option>
+                      {returnableProducts.map((item) => (
+                        <option key={item.productId} value={item.productId}>{item.name} · {item.remaining} left to return</option>
+                      ))}
+                    </select>
+                    {returnableProducts.length === 0 && <p className="mt-1 text-xs text-muted-foreground">All registered products on this receipt have already been returned.</p>}
+                  </div>
+                  {selectedReturnProduct && (
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-muted-foreground mb-1">Quantity (whole units)</label>
+                        <input type="number" min="1" max={selectedReturnProduct.remaining} step="1" value={returnQuantity}
+                          onChange={(event) => setReturnQuantity(event.target.value)}
+                          className="w-full px-3 py-2.5 bg-background border border-border rounded-lg text-sm" />
+                        <p className="mt-1 text-xs text-muted-foreground">Maximum return: {selectedReturnProduct.remaining}</p>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-muted-foreground mb-1">Estimated refund</label>
+                        <p className="px-3 py-2.5 bg-muted rounded-lg text-sm font-semibold">{fmt(returnRefundAmount)}</p>
+                      </div>
+                    </div>
+                  )}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-muted-foreground mb-1">Reason</label>
+                      <select value={returnReason} onChange={(event) => setReturnReason(event.target.value)}
+                        className="w-full px-3 py-2.5 bg-background border border-border rounded-lg text-sm">
+                        <option>Customer changed mind</option><option>Wrong item</option><option>Damaged item</option><option>Other</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-muted-foreground mb-1">Returned condition</label>
+                      <select value={returnCondition} onChange={(event) => setReturnCondition(event.target.value as "resalable" | "damaged")}
+                        className="w-full px-3 py-2.5 bg-background border border-border rounded-lg text-sm">
+                        <option value="resalable">Resalable — restore to stock</option><option value="damaged">Damaged — do not restock</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">Refund method</label>
+                    <select value={returnMethod} onChange={(event) => setReturnMethod(event.target.value as "cash" | "store_credit" | "external")}
+                      className="w-full px-3 py-2.5 bg-background border border-border rounded-lg text-sm">
+                      <option value="cash">Cash refund (record only)</option><option value="store_credit">Store credit (record only)</option><option value="external">UPI / bank handled outside the app</option>
+                    </select>
+                    <p className="mt-1 text-xs text-muted-foreground">This records the return and amount; it does not initiate a payment or refund.</p>
+                  </div>
+                </>
+              )}
+              {returnError && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{returnError}</p>}
+              <div className="flex justify-end gap-2 border-t border-border pt-3">
+                <button onClick={() => setShowReturnDialog(false)} className="px-4 py-2 rounded-lg border border-border text-sm">Cancel</button>
+                <button onClick={handleProcessReturn} disabled={processingReturn || !selectedReturnProduct || returnRefundAmount <= 0}
+                  className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50">
+                  {processingReturn ? "Recording…" : "Record Return"}
+                </button>
+              </div>
+              {returns.length > 0 && (
+                <div className="border-t border-border pt-3">
+                  <h3 className="text-xs font-semibold text-foreground mb-2">Recent product returns</h3>
+                  <div className="space-y-2">
+                    {[...returns].reverse().slice(0, 5).map((record) => (
+                      <div key={record.id} className="flex items-center justify-between gap-3 text-xs">
+                        <span className="truncate text-foreground">{record.productName} · {record.quantity} · {record.saleId}</span>
+                        <span className="shrink-0 text-muted-foreground">{fmt(record.refundAmount)} · {record.condition}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Excel-style grid */}
       <div className="flex-1 overflow-auto bg-white dark:bg-card">
@@ -5508,9 +5708,14 @@ function BillingApp({
   const [customers, setCustomers] = useLocalStorage<Customer[]>(scoped("customers"), []);
   const [demands, setDemands] = useLocalStorage<DemandOrder[]>(scoped("demands"), []);
   const [invoices, setInvoices] = useLocalStorage<InvoiceRecord[]>(scoped("invoices"), []);
+  const [cashSaleReturns, setCashSaleReturns] = useLocalStorage<CashSaleReturnRecord[]>(scoped("cash_sale_returns"), []);
+  const cashSaleReturnsRef = useRef(cashSaleReturns);
+  cashSaleReturnsRef.current = cashSaleReturns;
+  const returnProcessingRef = useRef(false);
   const [marketplaceInvoices, setMarketplaceInvoices] = useState<InvoiceRecord[]>([]);
   const [marketplaceCustomers, setMarketplaceCustomers] = useState<MarketplaceCustomerRecord[]>([]);
-  const [marketplaceRecordsError, setMarketplaceRecordsError] = useState<string | null>(null);
+  const [marketplaceInvoicesError, setMarketplaceInvoicesError] = useState<string | null>(null);
+  const [marketplaceCustomersError, setMarketplaceCustomersError] = useState<string | null>(null);
   const [reminders, setReminders] = useLocalStorage<Reminder[]>(scoped("reminders"), []);
   const [partyRates, setPartyRates] = useLocalStorage<PartyRate[]>(scoped("party_rates"), []);
   const [backups, setBackups] = useLocalStorage<BackupRecord[]>(scoped("backups"), []);
@@ -5555,19 +5760,34 @@ function BillingApp({
   }, [firebaseUser?.id, firebaseUser?.shopId]);
 
   useEffect(() => {
-    if (!firebaseUser?.shopId) {
+    const shopId = firebaseUser?.shopId;
+    if (!shopId) {
       setMarketplaceInvoices([]);
       setMarketplaceCustomers([]);
-      setMarketplaceRecordsError(null);
+      setMarketplaceInvoicesError(null);
+      setMarketplaceCustomersError(null);
       return;
     }
-    setMarketplaceRecordsError(null);
-    return subscribeToShopMarketplaceRecords(firebaseUser.shopId, {
-      onInvoices: (records) => setMarketplaceInvoices(records.map(toMarketplaceInvoiceRecord)),
-      onCustomers: setMarketplaceCustomers,
-      onError: (error) => {
-        console.error("Could not load marketplace invoices or customers:", error);
-        setMarketplaceRecordsError(`Marketplace records could not be loaded: ${error.message}`);
+    setMarketplaceInvoicesError(null);
+    setMarketplaceCustomersError(null);
+    return subscribeToShopMarketplaceRecords(shopId, {
+      onInvoices: (records) => {
+        setMarketplaceInvoices(records.map(toMarketplaceInvoiceRecord));
+        setMarketplaceInvoicesError(null);
+      },
+      onCustomers: (records) => {
+        setMarketplaceCustomers(records);
+        setMarketplaceCustomersError(null);
+      },
+      onError: (collection, error) => {
+        console.error(`Could not load ${collection} for shop ${shopId}:`, error);
+        const label = collection === "marketplaceInvoices" ? "Marketplace invoices" : "Marketplace customers";
+        const setError = collection === "marketplaceInvoices" ? setMarketplaceInvoicesError : setMarketplaceCustomersError;
+        const code = (error as Error & { code?: string }).code;
+        const detail = code === "permission-denied"
+          ? `Access to this shop's ${collection} was denied. Verify the signed-in account owns shop ${shopId} and that the current firestore.rules are deployed to the configured Firebase project/database.`
+          : error.message;
+        setError(`${label} could not be loaded: ${detail}`);
       },
     });
   }, [firebaseUser?.shopId]);
@@ -5885,6 +6105,37 @@ function BillingApp({
     return true;
   };
 
+  const processCashSaleReturn = (record: CashSaleReturnRecord) => {
+    if (returnProcessingRef.current) throw new Error("Another return is already being recorded.");
+    returnProcessingRef.current = true;
+    try {
+      if (cashSaleReturnsRef.current.some((existing) => existing.id === record.id)) return;
+      const sale = invoices.find((invoice) => invoice.id === record.saleId);
+      if (!sale || sale.source !== "pos") throw new Error("The selected Cash Sale receipt could not be found.");
+      const remainingQuantity = getRemainingReturnQuantity(sale, record.productId, cashSaleReturnsRef.current);
+      if (!Number.isInteger(record.quantity) || record.quantity < 1 || record.quantity > remainingQuantity) {
+        throw new Error("The return quantity exceeds the remaining quantity on this receipt.");
+      }
+      const expectedRefund = calculateReturnRefundAmount(sale, record.productId, record.quantity);
+      if (expectedRefund <= 0 || Math.abs(expectedRefund - record.refundAmount) > 0.01) {
+        throw new Error("The return amount could not be verified against the original receipt.");
+      }
+      if (record.condition === "resalable") {
+        if (!products.some((product) => product.id === record.productId)) {
+          throw new Error("This product is no longer in inventory, so the return was not recorded.");
+        }
+        setProducts((current) => current.map((product) => product.id === record.productId
+          ? { ...product, stock: product.stock + record.quantity }
+          : product));
+      }
+      const nextReturns = [...cashSaleReturnsRef.current, record];
+      cashSaleReturnsRef.current = nextReturns;
+      setCashSaleReturns(nextReturns);
+    } finally {
+      returnProcessingRef.current = false;
+    }
+  };
+
   const handleGstRegistrationSubmission = async (
     gstin: string,
     scheme: "regular" | "composition"
@@ -5963,13 +6214,13 @@ function BillingApp({
       case "local_products":
         return <ShopInventory listings={shopListings} shopId={localShop.id} onRefresh={() => setProducts([...products])} />;
       case "invoice":    return <InvoiceView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} onNavigate={handleNav} nextInvoiceLabel={nextInvoiceLabel} editInvoice={editingInvoice} onDoneEditing={() => { setEditingInvoiceId(null); handleNav("invoices"); }} partyRates={partyRates} gstRegistration={gstRegistration} gstRegistrationLoading={gstRegistrationLoading} shopId={firebaseUser?.shopId} shopOwnerUid={firebaseUser?.id} />;
-      case "invoices":   return <InvoicesView invoices={combinedInvoices} onDelete={(id) => setInvoices((prev) => prev.filter((inv) => inv.id !== id))} onNavigateInvoice={() => { setEditingInvoiceId(null); handleNav("invoice"); }} onEditInvoice={(id) => { setEditingInvoiceId(id); handleNav("invoice"); }} profile={profile} marketplaceRecordsError={marketplaceRecordsError} />;
-      case "cashsale":   return <CashSaleView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} invoices={invoices} devices={paymentDevices} gstRegistration={gstRegistration} gstRegistrationLoading={gstRegistrationLoading} shopId={firebaseUser?.shopId} shopOwnerUid={firebaseUser?.id} />;
+      case "invoices":   return <InvoicesView invoices={combinedInvoices} onDelete={(id) => setInvoices((prev) => prev.filter((inv) => inv.id !== id))} onNavigateInvoice={() => { setEditingInvoiceId(null); handleNav("invoice"); }} onEditInvoice={(id) => { setEditingInvoiceId(id); handleNav("invoice"); }} profile={profile} marketplaceRecordsError={marketplaceInvoicesError} />;
+      case "cashsale":   return <CashSaleView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} onProcessReturn={processCashSaleReturn} invoices={invoices} returns={cashSaleReturns} devices={paymentDevices} gstRegistration={gstRegistration} gstRegistrationLoading={gstRegistrationLoading} shopId={firebaseUser?.shopId} shopOwnerUid={firebaseUser?.id} />;
       case "posdevices": return <PaymentDevicesView devices={paymentDevices} setDevices={setPaymentDevices} invoices={invoices} />;
       case "barcode":    return <BarcodeView products={products} />;
       case "ppi":        return <ClosedPPIView cards={ppiCards} setCards={setPpiCards} profile={profile} />;
       case "gst":        return <GSTView profile={profile} />;
-      case "customers":  return <CustomersView customers={customers} setCustomers={setCustomers} profile={profile} marketplaceCustomers={marketplaceCustomers} shopId={localShop.id} marketplaceRecordsError={marketplaceRecordsError} openAddForm={pendingQuickAction === "customer"} onQuickActionHandled={clearPendingQuickAction} />;
+      case "customers":  return <CustomersView customers={customers} setCustomers={setCustomers} profile={profile} marketplaceCustomers={marketplaceCustomers} shopId={localShop.id} marketplaceRecordsError={marketplaceCustomersError} openAddForm={pendingQuickAction === "customer"} onQuickActionHandled={clearPendingQuickAction} />;
       case "settings":   return <SettingsView settings={settings} setSettings={setSettings} profile={profile} setProfile={setProfile} isAccountEmailLocked={Boolean(sessionUser.email)} shopId={firebaseUser?.shopId} shopOwnerUid={firebaseUser?.id} gstRegistration={gstRegistration} gstRegistrationLoading={gstRegistrationLoading} onSubmitGstRegistration={handleGstRegistrationSubmission} />;
       case "profile":    return <ProfileView profile={profile} setProfile={setProfile} invoices={invoices} products={products} customers={customers} isAccountEmailLocked={Boolean(sessionUser.email)} />;
       case "reminders":  return <RemindersView reminders={reminders} setReminders={setReminders} />;

@@ -65,11 +65,10 @@ export function subscribeToShopMarketplaceRecords(
   handlers: {
     onInvoices: (records: MarketplaceInvoiceDocument[]) => void;
     onCustomers: (records: MarketplaceCustomerRecord[]) => void;
-    onError: (error: Error) => void;
+    onError: (collection: 'marketplaceInvoices' | 'marketplaceCustomers', error: Error) => void;
   }
 ): Unsubscribe {
   if (!isFirebaseConfigured || !shopId) return () => {};
-  const emitError = (value: Error) => handlers.onError(value);
   const invoiceUnsubscribe = onSnapshot(
     collection(db, 'shops', shopId, 'marketplaceInvoices'),
     (snapshot) => {
@@ -79,7 +78,7 @@ export function subscribeToShopMarketplaceRecords(
       }));
       handlers.onInvoices(records);
     },
-    emitError
+    (error) => handlers.onError('marketplaceInvoices', error)
   );
   const customerUnsubscribe = onSnapshot(
     collection(db, 'shops', shopId, 'marketplaceCustomers'),
@@ -90,7 +89,7 @@ export function subscribeToShopMarketplaceRecords(
       }));
       handlers.onCustomers(records);
     },
-    emitError
+    (error) => handlers.onError('marketplaceCustomers', error)
   );
   return () => {
     invoiceUnsubscribe();
