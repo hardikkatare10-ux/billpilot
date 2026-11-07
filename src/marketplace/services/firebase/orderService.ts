@@ -36,6 +36,7 @@ import {
 } from '../../utils/formatters';
 import { calculateHaversineDistanceKm } from '../../utils/geo';
 import { adjustMarketplaceCompletedPurchaseAmount } from '../../utils/marketplaceCustomers';
+import { assertFirebaseReachable } from '../../../lib/firebaseConnectivity';
 
 export interface PlaceOrderInput {
   customerId: string;
@@ -240,6 +241,7 @@ export async function transitionFirestoreOrderStatus(
     throw new Error('The signed-in account does not match the requested order action.');
   }
 
+  await assertFirebaseReachable();
   const orderRef = doc(db, 'orders', orderId);
   let result: Order | null = null;
   await runTransaction(db, async (transaction) => {
@@ -384,6 +386,8 @@ export async function processAtomicOrder(input: PlaceOrderInput): Promise<OrderP
   if (!auth.currentUser || auth.currentUser.uid !== input.customerId) {
     throw new Error('Sign in with the customer account that is placing this order.');
   }
+
+  await assertFirebaseReachable();
 
   // 1. If Firebase is configured and online, execute atomic Firestore transaction
   if (isFirebaseConfigured && db) {

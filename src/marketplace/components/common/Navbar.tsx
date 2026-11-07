@@ -13,6 +13,7 @@ import { useLocation } from '../../context/LocationContext';
 import { formatINR } from '../../utils/formatters';
 import { dbStore } from '../../services/db/store';
 import nearBasketLogo from '../../assets/nearbasket-logo.png';
+import InstallAppLink from '../../../app/components/InstallAppLink';
 
 interface NavbarProps {
   currentTab: string;
@@ -145,6 +146,8 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
 
         {/* Zone 3: Actions, Sign In / User Account & Shopping Bag */}
         <div className="flex items-center gap-1 sm:gap-3 shrink-0">
+          <InstallAppLink />
+
           {/* Notifications (if signed in) */}
           {currentUser && (
             <div className="relative">

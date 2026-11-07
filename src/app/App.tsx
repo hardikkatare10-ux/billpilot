@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState, useRef } from "react";
 import AuthScreen from "./auth";
-import { queuePush, wipeCloudData } from "../lib/cloudSync";
+import { flushPending, pushCloudValueNow, queuePush, wipeCloudData } from "../lib/cloudSync";
+import { useConnectivity } from "../context/ConnectivityContext";
 import dukanYantraLogo from "../icon.png";
 import { connectPosDevice, discoverPosDevices, type PosDeviceInfo } from "./posDeviceIntegration";
 import { CameraScanButton, CameraScannerModal, FirstRunSetup, useDeviceType, useHardwareScanner } from "./deviceAndScan";
+import InstallAppLink from "./components/InstallAppLink";
 import {
   LayoutDashboard, ShoppingCart, Package, FileText, QrCode,
   Building2, Users, Settings, User, Plus, Search, Bell,
@@ -280,7 +282,7 @@ const ACTIVE_ACCOUNT_KEY = "billpro_active_business_id";
 const LEGACY_KEYS = ["profile", "settings", "products", "customers", "demands", "invoices", "ppi_cards"];
 
 // ─── localStorage Hook ────────────────────────────────────────────────────────
-function useLocalStorage<T>(key: string, initial: T): [T, (v: T | ((p: T) => T)) => void] {
+function useLocalStorage<T>(key: string, initial: T, syncToCloud = true): [T, (v: T | ((p: T) => T)) => void] {
   const [state, setState] = useState<T>(() => {
     try {
       const item = localStorage.getItem(key);
@@ -294,7 +296,7 @@ function useLocalStorage<T>(key: string, initial: T): [T, (v: T | ((p: T) => T))
     stateRef.current = next;
     setState(next);
     try { localStorage.setItem(key, JSON.stringify(next)); } catch { /* noop */ }
-    queuePush(key, next); // mirrors to Firebase when signed in (no-op otherwise)
+    if (syncToCloud) queuePush(key, next); // mirrors to Firebase when signed in (no-op otherwise)
   };
   return [state, set];
 }
@@ -892,6 +894,7 @@ function InventoryView({ products, setProducts, businessCategory, storageKey, op
   openAddForm?: boolean;
   onQuickActionHandled?: () => void;
 }) {
+  const { assertCloudSyncAvailable } = useConnectivity();
   const [search, setSearch] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -910,29 +913,63 @@ function InventoryView({ products, setProducts, businessCategory, storageKey, op
     onQuickActionHandled?.();
   }, [openAddForm, onQuickActionHandled]);
 
-  const emptyInventory = () => {
+  const emptyInventory = async () => {
     if (!products.length) {
       window.alert("Inventory is already empty.");
       return;
     }
     if (window.confirm(`Empty inventory and delete all ${products.length} product(s)? This cannot be undone.`)) {
-      setProducts([]);
-      setSearch("");
+      try {
+        await assertCloudSyncAvailable();
+        setProducts([]);
+        if (!(await flushPending())) {
+          setProducts(products);
+          throw new Error("Cloud sync did not confirm the inventory change. Reconnect and try again.");
+        }
+        setSearch("");
+      } catch (error) {
+        window.alert(error instanceof Error ? error.message : "Inventory could not be updated.");
+      }
     }
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!form.name || !form.price) return;
-    if (editId !== null) {
-      setProducts((prev) => prev.map((p) => p.id === editId ? { ...p, ...form, price: +form.price, costPrice: +form.costPrice, stock: +form.stock } : p));
-    } else {
-      const ts = Date.now();
-      setProducts((prev) => [...prev, { id: ts, name: form.name, sku: form.sku || `SKU-${ts}`, barcode: form.barcode || `89${ts}`, price: +form.price, costPrice: +form.costPrice, stock: +form.stock, unit: form.unit, category: form.category }]);
+    try {
+      await assertCloudSyncAvailable();
+      const previousProducts = products;
+      const nextProducts = editId !== null
+        ? products.map((product) => product.id === editId
+          ? { ...product, ...form, price: +form.price, costPrice: +form.costPrice, stock: +form.stock }
+          : product)
+        : (() => {
+            const ts = Date.now();
+            return [...products, {
+              id: ts,
+              name: form.name,
+              sku: form.sku || `SKU-${ts}`,
+              barcode: form.barcode || `89${ts}`,
+              price: +form.price,
+              costPrice: +form.costPrice,
+              stock: +form.stock,
+              unit: form.unit,
+              category: form.category,
+            }];
+          })();
+      setProducts(nextProducts);
+      if (!(await flushPending())) {
+        setProducts(previousProducts);
+        throw new Error("Cloud sync did not confirm the product change. Reconnect and try again.");
+      }
+      setShowForm(false);
+      setEditId(null);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Product could not be saved.");
     }
-    setShowForm(false); setEditId(null);
   };
 
-  const handleImportProducts = (importedProducts: ImportedProduct[]) => {
+  const handleImportProducts = async (importedProducts: ImportedProduct[]) => {
+    await assertCloudSyncAvailable();
     const baseId = Math.max(Date.now(), ...products.map((product) => product.id + 1));
     const newProducts: Product[] = [];
     importedProducts.forEach((product, index) => {
@@ -954,8 +991,27 @@ function InventoryView({ products, setProducts, businessCategory, storageKey, op
     if (newProducts.length !== importedProducts.length) {
       throw new Error("One or more rows failed validation before saving. Review the preview and try again.");
     }
+    const previousProducts = products;
     const nextProducts = persistImportedInventory(localStorage, storageKey, products, newProducts);
     setProducts(nextProducts);
+    if (!(await flushPending())) {
+      setProducts(previousProducts);
+      throw new Error("Cloud sync did not confirm the inventory import. Reconnect and try again.");
+    }
+  };
+
+  const handleDeleteProduct = async (productId: number) => {
+    const previousProducts = products;
+    try {
+      await assertCloudSyncAvailable();
+      setProducts(products.filter((product) => product.id !== productId));
+      if (!(await flushPending())) {
+        setProducts(previousProducts);
+        throw new Error("Cloud sync did not confirm the product deletion. Reconnect and try again.");
+      }
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Product could not be deleted.");
+    }
   };
 
   return (
@@ -1047,7 +1103,7 @@ function InventoryView({ products, setProducts, businessCategory, storageKey, op
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-1">
                       <button onClick={() => openEdit(p)} className="p-1.5 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded-lg transition-colors"><Edit2 className="w-3.5 h-3.5" /></button>
-                      <button onClick={() => setProducts((prev) => prev.filter((x) => x.id !== p.id))} className="p-1.5 text-muted-foreground hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"><Trash2 className="w-3.5 h-3.5" /></button>
+                      <button onClick={() => void handleDeleteProduct(p.id)} className="p-1.5 text-muted-foreground hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"><Trash2 className="w-3.5 h-3.5" /></button>
                     </div>
                   </td>
                 </tr>
@@ -2265,7 +2321,7 @@ function InvoicesView({ invoices, onDelete, onNavigateInvoice, onEditInvoice, pr
 function CashSaleView({ products, customers, profile, settings, onSave, onProcessReturn, invoices, returns, devices, gstRegistration, gstRegistrationLoading, shopId, shopOwnerUid }: {
   products: Product[]; customers: Customer[]; profile: Profile; settings: AppSettings;
   onSave: (inv: InvoiceRecord) => Promise<boolean> | boolean;
-  onProcessReturn: (record: CashSaleReturnRecord) => void;
+  onProcessReturn: (record: CashSaleReturnRecord) => Promise<void>;
   invoices: InvoiceRecord[];
   returns: CashSaleReturnRecord[];
   devices: PaymentDevice[];
@@ -2523,7 +2579,7 @@ function CashSaleView({ products, customers, profile, settings, onSave, onProces
     ? calculateReturnRefundAmount(selectedReturnSale, selectedReturnProduct.productId, returnQuantityNumber)
     : 0;
 
-  const handleProcessReturn = () => {
+  const handleProcessReturn = async () => {
     if (returnInProgress.current) return;
     if (!selectedReturnSale || !selectedReturnProduct || !returnReason.trim() ||
         !Number.isInteger(returnQuantityNumber) || returnQuantityNumber < 1 ||
@@ -2536,7 +2592,7 @@ function CashSaleView({ products, customers, profile, settings, onSave, onProces
     setProcessingReturn(true);
     setReturnError("");
     try {
-      onProcessReturn({
+      await onProcessReturn({
         id: `return_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
         saleId: selectedReturnSale.id,
         productId: selectedReturnProduct.productId,
@@ -3805,6 +3861,7 @@ function BulkUpdateView({ products, setProducts, customers, setCustomers }: {
   products: Product[]; setProducts: (v: Product[] | ((p: Product[]) => Product[])) => void;
   customers: Customer[]; setCustomers: (v: Customer[] | ((p: Customer[]) => Customer[])) => void;
 }) {
+  const { assertCloudSyncAvailable } = useConnectivity();
   const [entity, setEntity] = useState<"products" | "customers">("products");
   const [search, setSearch] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -3846,46 +3903,54 @@ function BulkUpdateView({ products, setProducts, customers, setCustomers }: {
     });
   };
 
-  const applyUpdate = () => {
+  const applyUpdate = async () => {
     if (selectedIds.size === 0) { setMessage("Select at least one item first."); return; }
     if (!value.trim()) { setMessage("Enter a value to apply."); return; }
 
-    if (entity === "products") {
-      const numVal = Number(value);
-      if (isNumericField && Number.isNaN(numVal)) { setMessage("Enter a valid number."); return; }
-      setProducts((prev) => prev.map((p) => {
-        if (!selectedIds.has(p.id)) return p;
-        if (!isNumericField) {
-          return { ...p, [productField]: value };
+    const numVal = Number(value);
+    if (isNumericField && Number.isNaN(numVal)) { setMessage("Enter a valid number."); return; }
+
+    try {
+      await assertCloudSyncAvailable();
+      if (entity === "products") {
+        setProducts((prev) => prev.map((p) => {
+          if (!selectedIds.has(p.id)) return p;
+          if (!isNumericField) return { ...p, [productField]: value };
+          const current = Number((p as any)[productField] ?? 0);
+          let next = current;
+          if (updateMode === "increase_pct") next = current + current * (numVal / 100);
+          else if (updateMode === "decrease_pct") next = current - current * (numVal / 100);
+          else if (updateMode === "fixed_value") next = current + numVal;
+          next = Math.max(0, Math.round(next * 100) / 100);
+          return { ...p, [productField]: next };
+        }));
+        if (!(await flushPending())) {
+          setProducts(products);
+          throw new Error("Cloud sync did not confirm the product update. Reconnect and try again.");
         }
-        const current = Number((p as any)[productField] ?? 0);
-        let next = current;
-        if (updateMode === "increase_pct") next = current + current * (numVal / 100);
-        else if (updateMode === "decrease_pct") next = current - current * (numVal / 100);
-        else if (updateMode === "fixed_value") next = current + numVal;
-        next = Math.max(0, Math.round(next * 100) / 100);
-        return { ...p, [productField]: next };
-      }));
-    } else {
-      const numVal = Number(value);
-      if (isNumericField && Number.isNaN(numVal)) { setMessage("Enter a valid number."); return; }
-      setCustomers((prev) => prev.map((c) => {
-        if (!selectedIds.has(c.id)) return c;
-        if (!isNumericField) {
-          return { ...c, [customerField]: value };
+      } else {
+        setCustomers((prev) => prev.map((c) => {
+          if (!selectedIds.has(c.id)) return c;
+          if (!isNumericField) return { ...c, [customerField]: value };
+          const current = Number((c as any)[customerField] ?? 0);
+          let next = current;
+          if (updateMode === "increase_pct") next = current + current * (numVal / 100);
+          else if (updateMode === "decrease_pct") next = current - current * (numVal / 100);
+          else if (updateMode === "fixed_value") next = current + numVal;
+          next = Math.max(0, Math.round(next * 100) / 100);
+          return { ...c, [customerField]: next };
+        }));
+        if (!(await flushPending())) {
+          setCustomers(customers);
+          throw new Error("Cloud sync did not confirm the customer update. Reconnect and try again.");
         }
-        const current = Number((c as any)[customerField] ?? 0);
-        let next = current;
-        if (updateMode === "increase_pct") next = current + current * (numVal / 100);
-        else if (updateMode === "decrease_pct") next = current - current * (numVal / 100);
-        else if (updateMode === "fixed_value") next = current + numVal;
-        next = Math.max(0, Math.round(next * 100) / 100);
-        return { ...c, [customerField]: next };
-      }));
+      }
+      setMessage(`Updated ${fieldLabel} for ${selectedIds.size} ${entity === "products" ? "product" : "customer"}${selectedIds.size > 1 ? "s" : ""}.`);
+      setSelectedIds(new Set());
+      setValue("");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "The update could not be saved.");
     }
-    setMessage(`Updated ${fieldLabel} for ${selectedIds.size} ${entity === "products" ? "product" : "customer"}${selectedIds.size > 1 ? "s" : ""}.`);
-    setSelectedIds(new Set());
-    setValue("");
   };
 
   return (
@@ -4500,9 +4565,11 @@ function CustomersView({ customers, setCustomers, profile, marketplaceCustomers,
   openAddForm?: boolean;
   onQuickActionHandled?: () => void;
 }) {
+  const { assertCloudSyncAvailable } = useConnectivity();
   const [search, setSearch] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [selected, setSelected] = useState<number | null>(null);
+  const [customerWriteError, setCustomerWriteError] = useState<string | null>(null);
   const [orderHistoryCustomerId, setOrderHistoryCustomerId] = useState<string | null>(null);
   const [selectedOrderInvoice, setSelectedOrderInvoice] = useState<LocalOrder | null>(null);
   const [historyOrders, setHistoryOrders] = useState<LocalOrder[]>([]);
@@ -4567,11 +4634,38 @@ function CustomersView({ customers, setCustomers, profile, marketplaceCustomers,
     }
   };
 
-  const handleAdd = () => {
+  const handleAdd = async () => {
     if (!form.name) return;
-    setCustomers((prev) => [...prev, { id: Date.now(), name: form.name, phone: form.phone, email: form.email, address: form.address, gst: form.gst, totalSpent: 0, lastPurchase: "-" }]);
-    setForm({ name: "", phone: "", email: "", address: "", gst: "" });
-    setShowAdd(false);
+    const previousCustomers = customers;
+    try {
+      await assertCloudSyncAvailable();
+      setCustomers([...customers, { id: Date.now(), name: form.name, phone: form.phone, email: form.email, address: form.address, gst: form.gst, totalSpent: 0, lastPurchase: "-" }]);
+      if (!(await flushPending())) {
+        setCustomers(previousCustomers);
+        throw new Error("Cloud sync did not confirm the customer change. Reconnect and try again.");
+      }
+      setCustomerWriteError(null);
+      setForm({ name: "", phone: "", email: "", address: "", gst: "" });
+      setShowAdd(false);
+    } catch (error) {
+      setCustomerWriteError(error instanceof Error ? error.message : "Customer could not be saved.");
+    }
+  };
+
+  const handleDeleteCustomer = async (customerId: number) => {
+    const previousCustomers = customers;
+    try {
+      await assertCloudSyncAvailable();
+      setCustomers(customers.filter((customer) => customer.id !== customerId));
+      if (!(await flushPending())) {
+        setCustomers(previousCustomers);
+        throw new Error("Cloud sync did not confirm the customer deletion. Reconnect and try again.");
+      }
+      setCustomerWriteError(null);
+      setSelected(null);
+    } catch (error) {
+      setCustomerWriteError(error instanceof Error ? error.message : "Customer could not be deleted.");
+    }
   };
 
   const sendWhatsApp = (c: Customer) => {
@@ -4582,6 +4676,7 @@ function CustomersView({ customers, setCustomers, profile, marketplaceCustomers,
   return (
     <div className="space-y-4">
       {marketplaceRecordsError && <p role="alert" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">{marketplaceRecordsError}</p>}
+      {customerWriteError && <p role="alert" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">{customerWriteError}</p>}
       <div className="flex gap-3">
         <div className="flex-1 relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
@@ -4641,7 +4736,7 @@ function CustomersView({ customers, setCustomers, profile, marketplaceCustomers,
                       <MessageCircle className="w-3.5 h-3.5" /> WhatsApp
                     </button>
                   )}
-                  <button onClick={(e) => { e.stopPropagation(); setCustomers((prev) => prev.filter((x) => x.id !== c.id)); setSelected(null); }}
+                  <button onClick={(e) => { e.stopPropagation(); void handleDeleteCustomer(c.id); }}
                     className="p-2 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"><Trash2 className="w-3.5 h-3.5" /></button>
                 </div>
               )}
@@ -5695,6 +5790,7 @@ function BillingApp({
   onTabChange?: (tab: Tab) => void;
   onSwitchToConsumer?: () => void;
 } = {}) {
+  const { assertCloudSyncAvailable } = useConnectivity();
   const [accounts, setAccounts] = useLocalStorage<BusinessAccount[]>(ACCOUNT_INDEX_KEY, []);
   const [activeBusinessId, setActiveBusinessId] = useLocalStorage<string>(ACTIVE_ACCOUNT_KEY, "");
   const activeAccount = accounts.find((a) => a.id === activeBusinessId);
@@ -5707,11 +5803,12 @@ function BillingApp({
   const [products, setProducts] = useLocalStorage<Product[]>(scoped("products"), []);
   const [customers, setCustomers] = useLocalStorage<Customer[]>(scoped("customers"), []);
   const [demands, setDemands] = useLocalStorage<DemandOrder[]>(scoped("demands"), []);
-  const [invoices, setInvoices] = useLocalStorage<InvoiceRecord[]>(scoped("invoices"), []);
+  const [invoices, setInvoices] = useLocalStorage<InvoiceRecord[]>(scoped("invoices"), [], false);
   const [cashSaleReturns, setCashSaleReturns] = useLocalStorage<CashSaleReturnRecord[]>(scoped("cash_sale_returns"), []);
   const cashSaleReturnsRef = useRef(cashSaleReturns);
   cashSaleReturnsRef.current = cashSaleReturns;
   const returnProcessingRef = useRef(false);
+  const invoiceSaveInProgress = useRef(false);
   const [marketplaceInvoices, setMarketplaceInvoices] = useState<InvoiceRecord[]>([]);
   const [marketplaceCustomers, setMarketplaceCustomers] = useState<MarketplaceCustomerRecord[]>([]);
   const [marketplaceInvoicesError, setMarketplaceInvoicesError] = useState<string | null>(null);
@@ -5845,33 +5942,34 @@ function BillingApp({
       if (previous.get(product.id) === signature) return;
       if (!existingListing && product.isPublishedToMarketplace !== true) return;
 
-      try {
-        const result = dbStore.upsertBillPilotProduct(shop.id, syncedProduct);
-        void createFirestoreProduct({
-          id: result.listing.id,
-          shopId: shop.id,
-          name: result.listing.product.name,
-          brand: result.listing.product.brand,
-          category: result.listing.product.category,
-          unit: result.listing.product.unit,
-          description: result.listing.product.description,
-          imageUrl: result.listing.product.imageUrl,
-          shopPricePaise: result.listing.shopPrice,
-          salePricePaise: result.listing.salePrice,
-          stockQuantity: result.listing.stockQuantity,
-          standardGSTRate: result.listing.product.standardGSTRate,
-          isVisible: result.listing.isVisible,
-          externalBillPilotItemId: result.listing.externalBillPilotItemId,
-        }).catch((error: unknown) => {
-          console.error(`NearBasket cloud sync failed for product ${product.id}:`, error);
-        });
-      } catch (error: unknown) {
-        console.error(`NearBasket sync failed for product ${product.id}:`, error);
-      }
+      void (async () => {
+        try {
+          await assertCloudSyncAvailable();
+          const result = dbStore.upsertBillPilotProduct(shop.id, syncedProduct);
+          await createFirestoreProduct({
+            id: result.listing.id,
+            shopId: shop.id,
+            name: result.listing.product.name,
+            brand: result.listing.product.brand,
+            category: result.listing.product.category,
+            unit: result.listing.product.unit,
+            description: result.listing.product.description,
+            imageUrl: result.listing.product.imageUrl,
+            shopPricePaise: result.listing.shopPrice,
+            salePricePaise: result.listing.salePrice,
+            stockQuantity: result.listing.stockQuantity,
+            standardGSTRate: result.listing.product.standardGSTRate,
+            isVisible: result.listing.isVisible,
+            externalBillPilotItemId: result.listing.externalBillPilotItemId,
+          });
+        } catch (error: unknown) {
+          console.error(`NearBasket sync failed for product ${product.id}:`, error);
+        }
+      })();
     });
 
     syncedMarketplaceProducts.current = { shopId: shop.id, signatures };
-  }, [activeAccount?.id, marketplaceStoreVersion, products, profile.businessId, profile.email]);
+  }, [activeAccount?.id, assertCloudSyncAvailable, marketplaceStoreVersion, products, profile.businessId, profile.email]);
 
   // ── Local-only auth (no server needed) ──────────────────────────────────────
   const LOCAL_AUTH_KEY = "billpilot_local_account";
@@ -6054,6 +6152,19 @@ function BillingApp({
   const nextInvoiceLabel = formatInvoiceNo(nextInvoiceNumber);
 
   const saveInvoice = async (inv: InvoiceRecord): Promise<boolean> => {
+    if (invoiceSaveInProgress.current) {
+      alert("An invoice submission is already in progress. Wait for it to finish before submitting again.");
+      return false;
+    }
+    invoiceSaveInProgress.current = true;
+    try {
+      await assertCloudSyncAvailable();
+    } catch (error) {
+      invoiceSaveInProgress.current = false;
+      alert(error instanceof Error ? error.message : "Cloud connectivity is unavailable. Invoice was not saved.");
+      return false;
+    }
+
     let registration: VerifiedGstRegistration | null = null;
     try {
       if (firebaseUser?.shopId && firebaseUser.id) {
@@ -6067,6 +6178,7 @@ function BillingApp({
       }
     } catch (error) {
       alert(error instanceof Error ? error.message : "Could not validate GST registration. Invoice was not saved.");
+      invoiceSaveInProgress.current = false;
       return false;
     }
     const verifiedRegularRegistration =
@@ -6095,20 +6207,42 @@ function BillingApp({
 
     if (!invoiceToSave) {
       alert("A current verified regular-scheme GSTIN is required to save a GST Tax Invoice.");
+      invoiceSaveInProgress.current = false;
       return false;
     }
-    setInvoices((prev) => {
-      const exists = prev.some((p) => p.id === inv.id);
-      if (exists) return prev.map((p) => (p.id === inv.id ? invoiceToSave : p));
-      return [invoiceToSave, ...prev];
-    });
+    const previousInvoices = invoices;
+    const nextInvoices = previousInvoices.some((previous) => previous.id === inv.id)
+      ? previousInvoices.map((previous) => previous.id === inv.id ? invoiceToSave : previous)
+      : [invoiceToSave, ...previousInvoices];
+    try {
+      await pushCloudValueNow(scoped("invoices"), nextInvoices);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Cloud sync did not confirm the invoice. It was not saved.");
+      invoiceSaveInProgress.current = false;
+      return false;
+    }
+    setInvoices(nextInvoices);
+    invoiceSaveInProgress.current = false;
     return true;
   };
 
-  const processCashSaleReturn = (record: CashSaleReturnRecord) => {
+  const deleteInvoice = async (invoiceId: string) => {
+    const previousInvoices = invoices;
+    try {
+      await assertCloudSyncAvailable();
+      const nextInvoices = previousInvoices.filter((invoice) => invoice.id !== invoiceId);
+      await pushCloudValueNow(scoped("invoices"), nextInvoices);
+      setInvoices(nextInvoices);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Invoice could not be deleted.");
+    }
+  };
+
+  const processCashSaleReturn = async (record: CashSaleReturnRecord): Promise<void> => {
     if (returnProcessingRef.current) throw new Error("Another return is already being recorded.");
     returnProcessingRef.current = true;
     try {
+      await assertCloudSyncAvailable();
       if (cashSaleReturnsRef.current.some((existing) => existing.id === record.id)) return;
       const sale = invoices.find((invoice) => invoice.id === record.saleId);
       if (!sale || sale.source !== "pos") throw new Error("The selected Cash Sale receipt could not be found.");
@@ -6120,6 +6254,8 @@ function BillingApp({
       if (expectedRefund <= 0 || Math.abs(expectedRefund - record.refundAmount) > 0.01) {
         throw new Error("The return amount could not be verified against the original receipt.");
       }
+      const previousProducts = products;
+      const previousReturns = cashSaleReturnsRef.current;
       if (record.condition === "resalable") {
         if (!products.some((product) => product.id === record.productId)) {
           throw new Error("This product is no longer in inventory, so the return was not recorded.");
@@ -6131,6 +6267,12 @@ function BillingApp({
       const nextReturns = [...cashSaleReturnsRef.current, record];
       cashSaleReturnsRef.current = nextReturns;
       setCashSaleReturns(nextReturns);
+      if (!(await flushPending())) {
+        setProducts(previousProducts);
+        setCashSaleReturns(previousReturns);
+        cashSaleReturnsRef.current = previousReturns;
+        throw new Error("Cloud sync did not confirm the return. It was not reported as recorded; reconnect before trying again.");
+      }
     } finally {
       returnProcessingRef.current = false;
     }
@@ -6207,14 +6349,14 @@ function BillingApp({
           <ShopDashboard
             shop={localShop}
             orders={shopOrders}
-            onRefreshOrders={() => setInvoices([...invoices])}
+            onRefreshOrders={() => setMarketplaceStoreVersion((version) => version + 1)}
             viewMode={tab === "local_orders" ? "orders" : "dashboard"}
           />
         );
       case "local_products":
-        return <ShopInventory listings={shopListings} shopId={localShop.id} onRefresh={() => setProducts([...products])} />;
+        return <ShopInventory listings={shopListings} shopId={localShop.id} onRefresh={() => setMarketplaceStoreVersion((version) => version + 1)} />;
       case "invoice":    return <InvoiceView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} onNavigate={handleNav} nextInvoiceLabel={nextInvoiceLabel} editInvoice={editingInvoice} onDoneEditing={() => { setEditingInvoiceId(null); handleNav("invoices"); }} partyRates={partyRates} gstRegistration={gstRegistration} gstRegistrationLoading={gstRegistrationLoading} shopId={firebaseUser?.shopId} shopOwnerUid={firebaseUser?.id} />;
-      case "invoices":   return <InvoicesView invoices={combinedInvoices} onDelete={(id) => setInvoices((prev) => prev.filter((inv) => inv.id !== id))} onNavigateInvoice={() => { setEditingInvoiceId(null); handleNav("invoice"); }} onEditInvoice={(id) => { setEditingInvoiceId(id); handleNav("invoice"); }} profile={profile} marketplaceRecordsError={marketplaceInvoicesError} />;
+      case "invoices":   return <InvoicesView invoices={combinedInvoices} onDelete={(id) => void deleteInvoice(id)} onNavigateInvoice={() => { setEditingInvoiceId(null); handleNav("invoice"); }} onEditInvoice={(id) => { setEditingInvoiceId(id); handleNav("invoice"); }} profile={profile} marketplaceRecordsError={marketplaceInvoicesError} />;
       case "cashsale":   return <CashSaleView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} onProcessReturn={processCashSaleReturn} invoices={invoices} returns={cashSaleReturns} devices={paymentDevices} gstRegistration={gstRegistration} gstRegistrationLoading={gstRegistrationLoading} shopId={firebaseUser?.shopId} shopOwnerUid={firebaseUser?.id} />;
       case "posdevices": return <PaymentDevicesView devices={paymentDevices} setDevices={setPaymentDevices} invoices={invoices} />;
       case "barcode":    return <BarcodeView products={products} />;
@@ -6281,6 +6423,7 @@ function BillingApp({
           </button>
           <h1 className="font-semibold text-foreground">{TITLES[tab]}</h1>
           <div className="ml-auto flex items-center gap-2">
+            <InstallAppLink />
             {onSwitchToConsumer && (
               <button
                 onClick={onSwitchToConsumer}

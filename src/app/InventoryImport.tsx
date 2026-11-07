@@ -17,7 +17,7 @@ interface ExistingProduct {
 
 interface InventoryImportProps {
   products: ExistingProduct[];
-  onImport: (products: ImportedProduct[]) => void;
+  onImport: (products: ImportedProduct[]) => void | Promise<void>;
   onClose: () => void;
 }
 
@@ -141,23 +141,25 @@ export function InventoryImport({ products, onImport, onClose }: InventoryImport
     setRows((current) => current.map((row) => row.rowNumber === rowNumber ? { ...row, includeDuplicate } : row));
   };
 
-  const handleImport = () => {
+  const handleImport = async () => {
     const importable = normalizedRows
       .filter((row) => !row.errors.length && (!row.duplicateReason || row.includeDuplicate))
       .map((row) => row.product);
     if (!importable.length || unresolvedAmbiguous > 0 || completed) return;
+    setLoading(true);
     try {
-      onImport(importable);
+      await onImport(importable);
+      setImportReport({
+        imported: importable.length,
+        skipped: rows.length - importable.length - invalidCount,
+        failed: invalidCount,
+      });
+      setCompleted(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The products could not be saved. Please retry.");
-      return;
+    } finally {
+      setLoading(false);
     }
-    setImportReport({
-      imported: importable.length,
-      skipped: rows.length - importable.length - invalidCount,
-      failed: invalidCount,
-    });
-    setCompleted(true);
   };
 
   const onDrop: React.DragEventHandler<HTMLLabelElement> = (event) => {
@@ -326,7 +328,7 @@ export function InventoryImport({ products, onImport, onClose }: InventoryImport
               <button
                 type="button"
                 onClick={handleImport}
-                disabled={!validCount || unresolvedAmbiguous > 0 || completed}
+                disabled={!validCount || unresolvedAmbiguous > 0 || completed || loading}
                 className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Check className="h-4 w-4" /> Import {validCount} product{validCount === 1 ? "" : "s"}

@@ -5,7 +5,10 @@ const store = new Map<string, any>(); // path -> data
 vi.mock("./firebase", () => ({ db: {} }));
 vi.mock("firebase/firestore", () => {
   const collection = (_db: any, ...segs: string[]) => ({ path: segs.join("/") });
-  const doc = (col: { path: string }, id: string) => ({ path: `${col.path}/${id}`, id });
+  const doc = (parent: { path?: string }, ...segs: string[]) => {
+    const path = parent.path ? `${parent.path}/${segs.join("/")}` : segs.join("/");
+    return { path, id: segs[segs.length - 1] };
+  };
   const makeBatch = () => {
     const ops: Array<() => void> = [];
     return {
@@ -20,6 +23,15 @@ vi.mock("firebase/firestore", () => {
     writeBatch: () => makeBatch(),
     deleteDoc: async (ref: any) => { store.delete(ref.path); },
     waitForPendingWrites: async () => {},
+    runTransaction: async (_db: any, update: (transaction: any) => Promise<void>) => {
+      const ops: Array<() => void> = [];
+      await update({
+        get: async () => ({ exists: () => false }),
+        set: (ref: any, data: any) => ops.push(() => store.set(ref.path, data)),
+        delete: (ref: any) => ops.push(() => store.delete(ref.path)),
+      });
+      ops.forEach((operation) => operation());
+    },
     getDocs: async (col: { path: string }) => {
       const docs = [...store.entries()]
         .filter(([p]) => p.startsWith(col.path + "/"))
@@ -41,7 +53,7 @@ class MemStorage {
 }
 
 import {
-  hydrateFromCloud, queuePush, flushPending, stopSync, wipeCloudData, clearLocalBusinessData,
+  hydrateFromCloud, pushCloudValueNow, queuePush, flushPending, stopSync, wipeCloudData, clearLocalBusinessData,
 } from "./cloudSync";
 
 beforeEach(() => {
@@ -55,6 +67,14 @@ describe("cloudSync", () => {
     localStorage.setItem("billpro_account_x_products", JSON.stringify([{ id: 1 }]));
     await hydrateFromCloud("u1");
     expect([...store.keys()].some((k) => k.endsWith("billpro_account_x_products"))).toBe(true);
+  });
+
+  it("does not automatically upload locally stored invoices during sign-in", async () => {
+    localStorage.setItem("billpro_account_x_invoices", JSON.stringify([{ id: "INV-LOCAL-1" }]));
+
+    await hydrateFromCloud("u1");
+
+    expect(store.has("users/u1/kv/billpro_account_x_invoices")).toBe(false);
   });
 
   it("round-trips a value larger than one chunk and restores it on a fresh device", async () => {
@@ -72,6 +92,16 @@ describe("cloudSync", () => {
     (globalThis as any).localStorage = new MemStorage();
     await hydrateFromCloud("u1");
     expect(JSON.parse(localStorage.getItem("billpro_account_x_invoices")!)).toEqual(big);
+  });
+
+  it("writes invoice values through the server transaction path", async () => {
+    await hydrateFromCloud("u1");
+    const invoices = [{ id: "INV-ONLINE-1", total: 250 }];
+
+    await pushCloudValueNow("billpro_account_x_invoices", invoices);
+
+    const saved = store.get("users/u1/kv/billpro_account_x_invoices");
+    expect(JSON.parse(saved.p)).toEqual(invoices);
   });
 
   it("removes leftover chunks when a value shrinks", async () => {

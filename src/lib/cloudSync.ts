@@ -1,8 +1,8 @@
 /**
  * Cloud sync for Dukan Yantra.
  *
- * localStorage stays the source of truth while the app runs (so billing keeps working offline).
- * Every `billpro_*` key is mirrored to Firestore under  users/{uid}/kv/{key}.
+ * localStorage holds app state while the app runs. Synced `billpro_*` keys are mirrored to
+ * Firestore under users/{uid}/kv/{key}; invoice submissions use a server transaction before local save.
  *  - On sign-in:  hydrateFromCloud() pulls remote data into localStorage BEFORE the app mounts.
  *  - On change:   queuePush() writes the key to Firestore (debounced).
  *
@@ -14,6 +14,7 @@ import {
   doc,
   getDocs,
   writeBatch,
+  runTransaction,
   deleteDoc,
   waitForPendingWrites,
 } from "firebase/firestore";
@@ -68,6 +69,37 @@ async function pushKey(uid: string, key: string, serialized: string | null, t: n
   await batch.commit();
 }
 
+async function pushKeyWithoutOfflineQueue(uid: string, key: string, serialized: string | null, t: number) {
+  if (!db) throw new Error("Cloud sync is not configured.");
+  const id = encodeKey(key);
+  const prevN = knownChunkCounts.get(key) ?? 1;
+  const parts: string[] = [];
+  if (serialized !== null) {
+    for (let i = 0; i < serialized.length; i += CHUNK_SIZE) parts.push(serialized.slice(i, i + CHUNK_SIZE));
+    if (parts.length === 0) parts.push("");
+  }
+
+  await runTransaction(db, async (transaction) => {
+    await transaction.get(doc(db!, "test", "connectivity"));
+    if (serialized === null) {
+      transaction.delete(doc(kvCol(uid), id));
+      for (let i = 1; i < prevN; i++) transaction.delete(doc(kvCol(uid), `${id}~${i}`));
+      return;
+    }
+
+    transaction.set(doc(kvCol(uid), id), { key, t, n: parts.length, p: parts[0] });
+    for (let i = 1; i < parts.length; i++) {
+      transaction.set(doc(kvCol(uid), `${id}~${i}`), { p: parts[i] });
+    }
+    for (let i = parts.length; i < prevN; i++) {
+      transaction.delete(doc(kvCol(uid), `${id}~${i}`));
+    }
+  });
+
+  if (serialized === null) knownChunkCounts.delete(key);
+  else knownChunkCounts.set(key, parts.length);
+}
+
 /** Call whenever a synced key changes. Safe to call when sync is off (does nothing). */
 export function queuePush(key: string, value: unknown | undefined) {
   if (!activeUid || !db || !isSyncKey(key)) return;
@@ -88,6 +120,21 @@ export function queuePush(key: string, value: unknown | undefined) {
       pushKey(uid, key, v, t).catch((e) => console.warn("[cloudSync] push failed:", key, e));
     }, DEBOUNCE_MS)
   );
+}
+
+/** Commit a cloud value with a server transaction that fails rather than queuing offline. */
+export async function pushCloudValueNow(key: string, value: unknown | undefined): Promise<void> {
+  if (!activeUid || !db || !isSyncKey(key)) {
+    throw new Error("Cloud sync is not active. Sign in before saving this change.");
+  }
+  const timer = timers.get(key);
+  if (timer) clearTimeout(timer);
+  timers.delete(key);
+  pending.delete(key);
+
+  const timestamp = Date.now();
+  await pushKeyWithoutOfflineQueue(activeUid, key, value === undefined ? null : JSON.stringify(value), timestamp);
+  touchMeta(key, timestamp);
 }
 
 /** Push anything still waiting on a debounce timer right now. */
@@ -112,14 +159,19 @@ async function flushDebounced() {
  */
 export async function flushPending(timeoutMs = 6000): Promise<boolean> {
   if (!db || !activeUid) return true;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
       (async () => { await flushDebounced(); await waitForPendingWrites(db!); })(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), timeoutMs)),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("timeout")), timeoutMs);
+      }),
     ]);
     return true;
   } catch {
     return false;
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 }
 
@@ -176,7 +228,8 @@ export async function hydrateFromCloud(uid: string): Promise<void> {
   const uploads: Promise<void>[] = [];
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
-    if (!key || !isSyncKey(key)) continue;
+    // Local invoices require an explicit online save; never replay an unsynced invoice on sign-in.
+    if (!key || !isSyncKey(key) || key.endsWith("_invoices")) continue;
     const raw = localStorage.getItem(key);
     if (raw === null) continue;
     const remoteMissing = !remoteKeys.has(key);

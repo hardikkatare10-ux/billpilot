@@ -17,6 +17,7 @@ import {
   deleteFirestoreProduct,
   ensureShopInitializedInFirestore,
 } from '../../services/firebase/productService';
+import { assertFirebaseReachable } from '../../../lib/firebaseConnectivity';
 
 interface ShopInventoryProps {
   listings: ShopListing[];
@@ -116,12 +117,27 @@ export const ShopInventory: React.FC<ShopInventoryProps> = ({ shopId, onRefresh 
 
     setIsSaving(true);
     try {
+      await assertFirebaseReachable();
       const pricePaise = Math.round(Number(editPriceRupees) * 100);
       const salePaise = editSaleRupees > 0 ? Math.round(Number(editSaleRupees) * 100) : null;
       const stock = Math.max(0, Number(editStock));
       const isAvail = editAvailable && stock > 0;
 
-      // 1. Update local store first
+      await updateFirestoreProduct(editingListing.id, {
+        name: editName.trim() || editingListing.product.name,
+        brand: editBrand.trim() || 'Local Brand',
+        category: editCategory || 'Groceries & Essentials',
+        unit: editUnit.trim() || '1 unit',
+        description: editDesc.trim(),
+        imageUrl: editImageUrl.trim() || editingListing.product.imageUrl,
+        shopPrice: pricePaise,
+        salePrice: salePaise,
+        stockQuantity: stock,
+        isAvailable: isAvail,
+        standardGSTRate: Number(editGstRate),
+        externalBillPilotItemId: editSku.trim() || undefined,
+      });
+
       dbStore.updateListingDetails(editingListing.id, {
         name: editName.trim() || editingListing.product.name,
         brand: editBrand.trim() || 'Local Brand',
@@ -144,22 +160,6 @@ export const ShopInventory: React.FC<ShopInventoryProps> = ({ shopId, onRefresh 
       );
       setRealtimeListings(dbStore.getListings(shopId));
 
-      // 2. Mirror to Firestore (best effort)
-      updateFirestoreProduct(editingListing.id, {
-        name: editName.trim() || editingListing.product.name,
-        brand: editBrand.trim() || 'Local Brand',
-        category: editCategory || 'Groceries & Essentials',
-        unit: editUnit.trim() || '1 unit',
-        description: editDesc.trim(),
-        imageUrl: editImageUrl.trim() || editingListing.product.imageUrl,
-        shopPrice: pricePaise,
-        salePrice: salePaise,
-        stockQuantity: stock,
-        isAvailable: isAvail,
-        standardGSTRate: Number(editGstRate),
-        externalBillPilotItemId: editSku.trim() || undefined,
-      }).catch((err) => console.warn('Edit saved locally; Firestore mirror skipped:', err));
-
       setEditingListing(null);
       onRefresh();
     } catch (err: unknown) {
@@ -174,11 +174,9 @@ export const ShopInventory: React.FC<ShopInventoryProps> = ({ shopId, onRefresh 
     if (!confirm('Are you sure you want to remove this product from your store catalogue?')) return;
 
     try {
+      await deleteFirestoreProduct(listingId);
       dbStore.deleteListing(listingId, shopId);
       setRealtimeListings(dbStore.getListings(shopId));
-      deleteFirestoreProduct(listingId).catch((err) =>
-        console.warn('Removed locally; Firestore mirror skipped:', err)
-      );
       onRefresh();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to delete product.';
@@ -192,6 +190,7 @@ export const ShopInventory: React.FC<ShopInventoryProps> = ({ shopId, onRefresh 
 
     setIsSaving(true);
     try {
+      await assertFirebaseReachable();
       const pricePaise = Math.round(Number(newPriceRupees) * 100);
       const salePaise = newSaleRupees > 0 ? Math.round(Number(newSaleRupees) * 100) : undefined;
       const stock = Math.max(0, Number(newStock));
@@ -201,7 +200,7 @@ export const ShopInventory: React.FC<ShopInventoryProps> = ({ shopId, onRefresh 
         'https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=400&q=80';
       const description = newDesc.trim() || `${newProdName.trim()} freshly stocked at local store.`;
 
-      // 1. Save locally first - this always works and is what the customer view reads
+      // Create locally to obtain the stable ID, then require the cloud write before confirming.
       const listing = dbStore.createProductListing(
         shopId,
         {
@@ -219,24 +218,28 @@ export const ShopInventory: React.FC<ShopInventoryProps> = ({ shopId, onRefresh 
         },
         shopId
       );
+      try {
+        await createFirestoreProduct({
+          id: listing.id,
+          shopId,
+          name: newProdName.trim(),
+          brand: newBrand.trim() || 'Local Quality',
+          category: newCategory,
+          unit: newUnit.trim() || '1 unit',
+          description,
+          imageUrl,
+          shopPricePaise: pricePaise,
+          salePricePaise: salePaise,
+          stockQuantity: stock,
+          standardGSTRate: Number(newGstRate),
+          externalBillPilotItemId: listing.externalBillPilotItemId,
+        });
+      } catch (error) {
+        dbStore.deleteListing(listing.id, shopId);
+        setRealtimeListings(dbStore.getListings(shopId));
+        throw error;
+      }
       setRealtimeListings(dbStore.getListings(shopId));
-
-      // 2. Mirror to Firestore (best effort, same id) - failure must not block the shopkeeper
-      createFirestoreProduct({
-        id: listing.id,
-        shopId,
-        name: newProdName.trim(),
-        brand: newBrand.trim() || 'Local Quality',
-        category: newCategory,
-        unit: newUnit.trim() || '1 unit',
-        description,
-        imageUrl,
-        shopPricePaise: pricePaise,
-        salePricePaise: salePaise,
-        stockQuantity: stock,
-        standardGSTRate: Number(newGstRate),
-        externalBillPilotItemId: listing.externalBillPilotItemId,
-      }).catch((err) => console.warn('Product saved locally; Firestore mirror skipped:', err));
 
       setIsAddingProduct(false);
       // Reset form

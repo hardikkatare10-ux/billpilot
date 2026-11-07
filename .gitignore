@@ -15,6 +15,7 @@ dist/
 dist-ssr/
 build/
 out/
+release/
 *.tsbuildinfo
 
 # ───── Environment & secrets (never commit these) ─────

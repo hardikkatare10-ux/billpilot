@@ -1,0 +1,52 @@
+{
+  "name": "dukan-yantra-desktop",
+  "version": "0.0.1",
+  "description": "Dukan Yantra desktop application shell",
+  "author": "Dukan Yantra",
+  "private": true,
+  "main": "main.cjs",
+  "dependencies": {},
+  "build": {
+    "appId": "com.dukanyantra.desktop",
+    "productName": "Dukan Yantra",
+    "electronVersion": "45.2.3",
+    "asar": true,
+    "npmRebuild": false,
+    "directories": {
+      "output": "../release",
+      "buildResources": "icons"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "icons/dukanyantra.ico"
+    ],
+    "extraResources": [
+      {
+        "from": "../dist",
+        "to": "dist"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "icons/dukanyantra.ico",
+      "artifactName": "Dukan Yantra Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Dukan Yantra",
+      "uninstallDisplayName": "Dukan Yantra",
+      "installerIcon": "icons/dukanyantra.ico",
+      "uninstallerIcon": "icons/dukanyantra.ico",
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}

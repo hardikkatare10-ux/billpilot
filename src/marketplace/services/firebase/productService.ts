@@ -20,6 +20,7 @@ import {
 import { db, auth, handleFirestoreError, OperationType, ensureFirebaseSession } from './config';
 import { FirestoreProduct, ShopListing, Shop } from '../../types';
 import { dbStore } from '../db/store';
+import { assertFirebaseReachable } from '../../../lib/firebaseConnectivity';
 
 // Helper converter: FirestoreProduct -> ShopListing
 export function productToShopListing(p: FirestoreProduct): ShopListing {
@@ -136,6 +137,7 @@ export async function createFirestoreProduct(
   },
   ownerIdOverride?: string
 ): Promise<FirestoreProduct> {
+  await assertFirebaseReachable();
   const currentUid = (await ensureFirebaseSession()) || auth.currentUser?.uid || ownerIdOverride || '';
   const productId =
     input.id || `prod_${input.shopId}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
@@ -188,6 +190,7 @@ export async function updateFirestoreProduct(
   productId: string,
   updates: Partial<Omit<FirestoreProduct, 'id' | 'shopId' | 'createdAt'>>
 ): Promise<void> {
+  await assertFirebaseReachable();
   const now = new Date().toISOString();
   const payload: Record<string, any> = {
     ...updates,
@@ -213,6 +216,7 @@ export async function updateFirestoreProduct(
  */
 export async function deleteFirestoreProduct(productId: string): Promise<void> {
   try {
+    await assertFirebaseReachable();
     await ensureFirebaseSession();
     const docRef = doc(db, 'products', productId);
     await deleteDoc(docRef);
@@ -227,6 +231,7 @@ export async function deleteFirestoreProduct(productId: string): Promise<void> {
  */
 export async function ensureShopInitializedInFirestore(shop: Shop): Promise<void> {
   try {
+    await assertFirebaseReachable();
     const currentUid = (await ensureFirebaseSession()) || auth.currentUser?.uid;
     if (!currentUid) return;
 
