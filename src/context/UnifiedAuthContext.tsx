@@ -324,7 +324,6 @@ export const UnifiedAuthProvider: React.FC<{ children: React.ReactNode }> = ({ c
           reviewCount: 1,
           verificationStatus: 'pending',
           verificationDetails: {
-            tradeLicenseNo: input.shopDetails.tradeLicenseNo,
             notes: 'Applied during Dukan Yantra merchant onboarding. Pending admin review.',
           },
           address: {
@@ -366,6 +365,12 @@ export const UnifiedAuthProvider: React.FC<{ children: React.ReactNode }> = ({ c
               : {}),
             submittedAt: nowIso,
             updatedAt: nowIso,
+          });
+          await setDoc(doc(db, 'shops', shopId, 'private', 'verificationDetails'), {
+            ...(input.shopDetails.tradeLicenseNo?.trim()
+              ? { tradeLicenseNo: input.shopDetails.tradeLicenseNo.trim() }
+              : {}),
+            notes: 'Applied during Dukan Yantra merchant onboarding. Pending admin review.',
           });
         } catch (e) {
           console.error('Firestore shop create failed:', e);

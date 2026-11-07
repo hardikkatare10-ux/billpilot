@@ -139,7 +139,13 @@ service cloud.firestore {
 
     // 3. Shops Collection
     match /shops/{shopId} {
-      allow read: if true; // Public marketplace discovery
+      function hasNoPublicTradeLicense() {
+        return !('verificationDetails' in existing())
+          || !(existing().verificationDetails is map)
+          || !('tradeLicenseNo' in existing().verificationDetails);
+      }
+
+      allow read: if isAdmin() || isShopOwner(shopId) || hasNoPublicTradeLicense();
 
       // Only registered users can register a shop, always in pending verification status
       allow create: if isSignedIn()
@@ -196,6 +202,18 @@ service cloud.firestore {
           && incoming().requestedScheme in ['regular', 'composition']
         );
         allow delete: if isAdmin();
+      }
+
+      match /private/verificationDetails {
+        allow read: if isAdmin() || isShopOwner(shopId);
+        allow create: if isAdmin() || (
+          isSignedIn()
+          && isShopOwner(shopId)
+          && incoming().keys().hasOnly(['tradeLicenseNo', 'notes'])
+          && (!('tradeLicenseNo' in incoming()) || incoming().tradeLicenseNo is string)
+          && (!('notes' in incoming()) || incoming().notes is string)
+        );
+        allow update, delete: if isAdmin();
       }
 
       match /private/verificationApplication {
@@ -549,6 +567,7 @@ service cloud.firestore {
       allow update: if isSignedIn() && (
         (existing().ownerId == request.auth.uid
           && incoming().ownerId == existing().ownerId
+          && incoming().shopId == existing().shopId
           && ownsVerifiedShop(existing().shopId))
         || (incoming().diff(existing()).affectedKeys().hasOnly(['stockQuantity', 'isAvailable', 'updatedAt'])
             && incoming().stockQuantity is number

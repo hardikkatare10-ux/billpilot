@@ -33,7 +33,7 @@ import { formatINR } from '../../utils/formatters';
 import { dbStore } from '../../services/db/store';
 import { InvoiceModal } from '../common/InvoiceModal';
 import { AreaDirectoryAdmin } from './AreaDirectoryAdmin';
-import { doc, getDoc } from 'firebase/firestore';
+import { deleteField, doc, getDoc, writeBatch } from 'firebase/firestore';
 import { db } from '../../services/firebase/config';
 import type { GstRegistrationStatus } from '../../../app/invoiceRules';
 import {
@@ -60,6 +60,10 @@ interface PrivateVerificationApplication {
   photos?: Record<'exterior' | 'interior' | 'shopkeeper', PrivateVerificationFile>;
   businessDocument?: PrivateVerificationFile & { type: string };
   additionalDocuments?: (PrivateVerificationFile & { type: string })[];
+}
+
+interface PrivateShopVerificationDetails {
+  tradeLicenseNo?: string;
 }
 
 interface AdminDashboardProps {
@@ -114,6 +118,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [verificationApplications, setVerificationApplications] = useState<
     Record<string, PrivateVerificationApplication | null>
   >({});
+  const [privateVerificationDetails, setPrivateVerificationDetails] = useState<
+    Record<string, PrivateShopVerificationDetails>
+  >({});
   const [verificationFilePreview, setVerificationFilePreview] = useState<{
     url: string;
     label: string;
@@ -149,6 +156,37 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   useEffect(() => () => {
     if (verificationFilePreview?.url) URL.revokeObjectURL(verificationFilePreview.url);
   }, [verificationFilePreview]);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(shops.map(async (shop) => {
+      const detailsRef = doc(db, 'shops', shop.id, 'private', 'verificationDetails');
+      const detailsSnapshot = await getDoc(detailsRef);
+      const details = detailsSnapshot.exists()
+        ? detailsSnapshot.data() as PrivateShopVerificationDetails
+        : {};
+      const legacyLicense = shop.verificationDetails?.tradeLicenseNo;
+
+      if (legacyLicense) {
+        const batch = writeBatch(db);
+        if (!details.tradeLicenseNo) {
+          batch.set(detailsRef, { tradeLicenseNo: legacyLicense }, { merge: true });
+          details.tradeLicenseNo = legacyLicense;
+        }
+        batch.update(doc(db, 'shops', shop.id), {
+          'verificationDetails.tradeLicenseNo': deleteField(),
+        });
+        await batch.commit();
+      }
+
+      return [shop.id, details] as const;
+    })).then((entries) => {
+      if (!cancelled) setPrivateVerificationDetails(Object.fromEntries(entries));
+    }).catch((error) => {
+      console.error('Could not load or migrate private shop verification details:', error);
+    });
+    return () => { cancelled = true; };
+  }, [shops]);
 
   useEffect(() => {
     let cancelled = false;
@@ -490,7 +528,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       </div>
                       <div>
                         <dt className="text-slate-500">Trade License</dt>
-                        <dd className="mt-0.5 font-mono font-semibold text-slate-900">{shop.verificationDetails?.tradeLicenseNo || 'Not provided'}</dd>
+                        <dd className="mt-0.5 font-mono font-semibold text-slate-900">{privateVerificationDetails[shop.id]?.tradeLicenseNo || shop.verificationDetails?.tradeLicenseNo || 'Not provided'}</dd>
                       </div>
                       <div>
                         <dt className="text-slate-500">Applied</dt>
