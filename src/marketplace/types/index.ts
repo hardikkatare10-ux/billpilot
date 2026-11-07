@@ -281,6 +281,8 @@ export interface Order {
   status: OrderStatus;
   paymentMethod: PaymentMethod;
   paymentStatus: PaymentStatus;
+  refundAmount?: MinorUnits;
+  shopArchived?: boolean;
   statusHistory: OrderStatusHistoryEntry[];
   delivery: DeliveryRecord;
   invoice?: InvoiceReference;

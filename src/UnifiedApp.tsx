@@ -35,6 +35,7 @@ import { AdminDashboard } from './marketplace/components/admin/AdminDashboard';
 import { ShopVerificationStatus } from './marketplace/components/common/ShopVerificationStatus';
 import InstallButton from './app/components/InstallButton';
 import { ConnectivityBanner, ConnectivityProvider } from './context/ConnectivityContext';
+import { pathToShopkeeperTab, shopkeeperTabToPath } from './app/shopkeeperRoutes';
 
 // Icons
 import {
@@ -53,45 +54,6 @@ import {
 
 const GOOGLE_MAPS_API_KEY = (import.meta as any).env?.VITE_GOOGLE_MAPS_API_KEY || '';
 
-// Route mapper from path to shopkeeper tab
-function pathToShopkeeperTab(pathname: string): any {
-  if (pathname.includes('/shopkeeper/billing')) return 'cashsale';
-  if (pathname.startsWith('/shopkeeper/fulfillment')) return 'local_orders';
-  if (pathname.includes('/shopkeeper/products')) return 'inventory';
-  if (pathname.includes('/shopkeeper/inventory')) return 'inventory';
-  if (pathname.includes('/shopkeeper/customers')) return 'customers';
-  if (pathname.includes('/shopkeeper/invoices')) return 'invoices';
-  if (pathname.includes('/shopkeeper/local/products')) return 'local_products';
-  if (pathname.includes('/shopkeeper/local/orders')) return 'local_orders';
-  if (pathname.includes('/shopkeeper/local')) return 'local_dashboard';
-  if (pathname.includes('/shopkeeper/settings')) return 'settings';
-  return 'dashboard';
-}
-
-function shopkeeperTabToPath(tab: string): string {
-  switch (tab) {
-    case 'cashsale':
-    case 'invoice':
-      return '/shopkeeper/billing';
-    case 'inventory':
-      return '/shopkeeper/inventory';
-    case 'customers':
-      return '/shopkeeper/customers';
-    case 'invoices':
-      return '/shopkeeper/invoices';
-    case 'local_dashboard':
-      return '/shopkeeper/local';
-    case 'local_products':
-      return '/shopkeeper/local/products';
-    case 'local_orders':
-      return '/shopkeeper/fulfillment';
-    case 'settings':
-      return '/shopkeeper/settings';
-    default:
-      return '/shopkeeper/dashboard';
-  }
-}
-
 const MainAppContent: React.FC = () => {
   const {
     currentUser,
@@ -106,11 +68,13 @@ const MainAppContent: React.FC = () => {
   } = useUnifiedAuth();
   const { openAuthModal } = useAuth();
   const { setIsCartDrawerOpen } = useCart();
+  // The authenticated profile's shopId is the canonical scope used by fulfillment
+  // and Firestore security rules. Email matching is only a legacy fallback.
   const orderShopId = currentUser
-    ? dbStore.getShops().find(
+    ? currentUser.shopId ||
+      dbStore.getShops().find(
         (shop) => shop.email.trim().toLowerCase() === currentUser.email.trim().toLowerCase()
       )?.id ||
-      currentUser.shopId ||
       dbStore.getShops().find((shop) => shop.ownerId === currentUser.id)?.id
     : undefined;
 
@@ -129,6 +93,7 @@ const MainAppContent: React.FC = () => {
   const [disputeOrder, setDisputeOrder] = useState<Order | null>(null);
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
   const [orderSyncError, setOrderSyncError] = useState<string | null>(null);
+  const [marketplaceOrdersLoading, setMarketplaceOrdersLoading] = useState(false);
 
   const navigate = useCallback((to: string) => {
     setCurrentRoute(to);
@@ -160,15 +125,18 @@ const MainAppContent: React.FC = () => {
   }, [refreshGlobal]);
 
   useEffect(() => {
-    if (!currentUser) return;
+    if (!currentUser) { setMarketplaceOrdersLoading(false); return; }
     setOrderSyncError(null);
+    setMarketplaceOrdersLoading(Boolean(isApprovedShopkeeper && orderShopId));
     if (isApprovedShopkeeper && !orderShopId) {
       setOrderSyncError('No marketplace shop is linked to this merchant account.');
+      setMarketplaceOrdersLoading(false);
       return;
     }
     return subscribeToOrders(currentUser.id, orderShopId, (error) => {
       setOrderSyncError(`Marketplace orders could not be loaded: ${error.message}`);
-    });
+      setMarketplaceOrdersLoading(false);
+    }, () => setMarketplaceOrdersLoading(false));
   }, [currentUser?.id, orderShopId, isApprovedShopkeeper]);
 
   // Sync route on popstate
@@ -419,6 +387,8 @@ const MainAppContent: React.FC = () => {
               email: currentUser.email,
               shopId: currentUser.shopId,
             }}
+            marketplaceOrdersError={orderSyncError}
+            marketplaceOrdersLoading={marketplaceOrdersLoading}
             initialTab={initialShopTab}
             onTabChange={(t) => {
               const nextPath = shopkeeperTabToPath(t);

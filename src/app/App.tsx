@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState, useRef } from "react";
+import { auth } from "../lib/firebase";
+import JsBarcode from "jsbarcode";
 import AuthScreen from "./auth";
 import { flushPending, pushCloudValueNow, queuePush, wipeCloudData } from "../lib/cloudSync";
 import { useConnectivity } from "../context/ConnectivityContext";
@@ -16,7 +18,7 @@ import {
   Tag, ChevronRight, Eye, Star, RotateCcw, LogOut,
   Globe, Copy, Store, ChevronDown, ShoppingBag,
   Wallet, CreditCard, Gift, Award, Download,
-  HardDrive, FileSpreadsheet
+  HardDrive, FileSpreadsheet, ClipboardList
 } from "lucide-react";
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -28,6 +30,16 @@ import { InvoiceModal } from "../marketplace/components/common/InvoiceModal";
 import { InventoryImport } from "./InventoryImport";
 import type { ImportedProduct } from "./inventoryImportParser";
 import { persistImportedInventory } from "./inventoryImportPersistence";
+import {
+  A4_40_LABEL_DIMENSIONS,
+  A4_LAYOUT_PRESETS,
+  buildA4LayoutConfig,
+  detectBarcodeFormat,
+  isValidBarcodeValue,
+  sanitizeBarcodeValue,
+  type A4LayoutPreset,
+  type BarcodeFormat,
+} from "./barcodeUtils";
 import {
   calculateReturnRefundAmount,
   getRemainingReturnQuantity,
@@ -63,6 +75,8 @@ import {
   formatMarketplaceAddress,
   getMarketplaceMapsUrl,
 } from "../marketplace/utils/marketplaceCustomers";
+import { RegularDemandsView, WhatsAppReportsView, type RegularDemandRecord, type WhatsAppSettings } from "./businessFeatures";
+import { calculateMarketplaceSalesSummary, getMarketplaceFulfillmentBucket, resolveMarketplaceDateRange, type MarketplaceDatePreset } from "./marketplaceSales";
 
 const env = (import.meta as any).env as { VITE_API_BASE?: string; DEV?: boolean };
 const API_BASE = env.VITE_API_BASE || "/api";
@@ -243,7 +257,7 @@ interface BusinessReport {
 interface SyncJob {
   id: string; label: string; status: "idle" | "running" | "done" | "error"; lastRun: string;
 }
-type Tab = "dashboard" | "demand" | "inventory" | "invoice" | "invoices" | "cashsale" | "posdevices" | "reminders" | "rates" | "bulk" | "backup" | "reports" | "sync" | "barcode" | "gst" | "customers" | "settings" | "profile" | "ppi" | "local_dashboard" | "local_orders" | "local_products";
+export type Tab = "dashboard" | "demand" | "regular_demands" | "whatsapp_reports" | "inventory" | "invoice" | "invoices" | "cashsale" | "posdevices" | "reminders" | "rates" | "bulk" | "backup" | "reports" | "sync" | "barcode" | "gst" | "customers" | "settings" | "profile" | "ppi" | "local_dashboard" | "local_orders" | "local_products";
 type InvoiceTemplate = "modern" | "classic" | "premium" | "official";
 
 const INVOICE_TEMPLATES: { id: InvoiceTemplate; label: string; desc: string }[] = [
@@ -607,20 +621,35 @@ function AccountAccessScreen({ accounts, onRegister, onActivate, accountEmail, a
 }
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
-function DashboardView({ products, customers, demands, invoices, nextInvoiceLabel, reminders, onNavigate, marketplaceOrders }: {
+function DashboardView({ products, customers, demands, invoices, nextInvoiceLabel, reminders, onNavigate, onOpenMarketplaceOrder, marketplaceOrders, marketplaceShopId, marketplaceOrdersLoading, marketplaceOrdersError }: {
   products: Product[]; customers: Customer[]; demands: DemandOrder[]; invoices: InvoiceRecord[]; nextInvoiceLabel: string;
   marketplaceOrders: LocalOrder[];
+  marketplaceShopId: string; marketplaceOrdersLoading: boolean; marketplaceOrdersError: string | null;
   reminders: Reminder[]; onNavigate?: (tab: Tab, openForm?: "product" | "customer") => void;
+  onOpenMarketplaceOrder?: (orderId: string) => void;
 }) {
+  const [marketplaceRangePreset,setMarketplaceRangePreset]=useState<MarketplaceDatePreset>('month');
+  const localToday = new Date();
+  const localDate = (date: Date) => `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+  const [customMarketplaceStart,setCustomMarketplaceStart]=useState(localDate(localToday));
+  const [customMarketplaceEnd,setCustomMarketplaceEnd]=useState(localDate(localToday));
+  const [marketplaceTransactionSearch,setMarketplaceTransactionSearch]=useState('');
+  const [marketplaceTransactionStatus,setMarketplaceTransactionStatus]=useState('all');
+  const marketplaceDateRange=resolveMarketplaceDateRange(marketplaceRangePreset,localToday,{start:customMarketplaceStart,end:customMarketplaceEnd});
+  const marketplaceSummary=calculateMarketplaceSalesSummary(marketplaceOrders,marketplaceShopId,marketplaceDateRange);
+  const marketplaceTransactions=marketplaceSummary.orders.filter(order=>{
+    const query=marketplaceTransactionSearch.trim().toLowerCase();
+    const productsText=order.items.map(item=>item.productName).join(' ');
+    const matchesQuery=!query||`${order.id} ${order.orderNumber} ${order.customerName} ${productsText}`.toLowerCase().includes(query);
+    const matchesStatus=marketplaceTransactionStatus==='all'||getMarketplaceFulfillmentBucket(order)===marketplaceTransactionStatus;
+    return matchesQuery&&matchesStatus;
+  });
   const totalRevenue = invoices.reduce((s, i) => s + i.total, 0);
   const thisMonth = new Date().toISOString().slice(0, 7);
   const monthRevenue = invoices.filter((i) => i.date.startsWith(thisMonth)).reduce((s, i) => s + i.total, 0);
   const lowStock = products.filter((p) => p.stock <= 10).length;
   const pendingCount = demands.filter((d) => d.status === "pending").length;
-  const marketplaceCollected = marketplaceOrders
-    .filter((order) => order.status === "delivered" && order.paymentStatus === "completed")
-    .reduce((sum, order) => sum + order.totalAmount / 100, 0);
-
+  const fmtMarketplace = (amount: number) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 2 }).format(amount);
   const todayStr = new Date().toISOString().split("T")[0];
   const pendingReminders = reminders.filter((r) => r.status === "pending");
   const overdueReminders = pendingReminders.filter((r) => r.dueDate < todayStr);
@@ -656,19 +685,51 @@ function DashboardView({ products, customers, demands, invoices, nextInvoiceLabe
         ))}
       </div>
 
-      <section className="grid grid-cols-1 sm:grid-cols-2 gap-4" aria-label="NearBasket marketplace totals">
-        <div className="bg-card rounded-xl p-4 border border-border shadow-sm">
-          <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Marketplace Orders</p>
-          <p className="text-2xl font-semibold font-[DM_Mono] text-foreground mt-2">{marketplaceOrders.length}</p>
-          <button onClick={() => onNavigate?.("local_orders")} className="text-xs text-primary font-semibold mt-1 hover:underline">
-            Open marketplace order history
-          </button>
+      <section className="space-y-4 rounded-xl border border-blue-100 bg-white p-5 shadow-sm" aria-label="Marketplace sales">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div><h3 className="font-semibold text-foreground">Marketplace Sales</h3><p className="mt-1 text-xs text-muted-foreground">Shop-specific Local Marketplace orders; separate from manual invoices.</p></div>
+          <div className="flex flex-wrap items-center gap-2">
+            <select aria-label="Marketplace sales date range" className="rounded-lg border border-border bg-background px-3 py-2 text-sm" value={marketplaceRangePreset} onChange={(event)=>setMarketplaceRangePreset(event.target.value as MarketplaceDatePreset)}>
+              <option value="today">Today</option><option value="yesterday">Yesterday</option><option value="week">This week</option><option value="month">This month</option><option value="custom">Custom range</option>
+            </select>
+            {marketplaceRangePreset==='custom'&&<div className="flex items-center gap-2"><input aria-label="Marketplace start date" type="date" className="rounded-lg border border-border bg-background px-2 py-2 text-sm" value={customMarketplaceStart} onChange={event=>setCustomMarketplaceStart(event.target.value)}/><span className="text-xs text-muted-foreground">to</span><input aria-label="Marketplace end date" type="date" className="rounded-lg border border-border bg-background px-2 py-2 text-sm" value={customMarketplaceEnd} onChange={event=>setCustomMarketplaceEnd(event.target.value)}/></div>}
+            <button onClick={() => onNavigate?.("local_orders")} className="rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary/90">View Marketplace Orders</button>
+          </div>
         </div>
-        <div className="bg-card rounded-xl p-4 border border-border shadow-sm">
-          <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Paid Marketplace Sales</p>
-          <p className="text-2xl font-semibold font-[DM_Mono] text-foreground mt-2">{fmt(marketplaceCollected)}</p>
-          <p className="text-xs text-muted-foreground mt-1">Delivered and payment-completed orders only; shown separately from manual invoices.</p>
+        {marketplaceOrdersError&&<p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{marketplaceOrdersError}</p>}
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="rounded-xl bg-blue-50 p-4"><p className="text-xs font-medium text-blue-800">Marketplace Sales · net</p><p className="mt-1 text-xl font-bold font-[DM_Mono] text-blue-950">{fmtMarketplace(marketplaceSummary.netMarketplaceSales)}</p></div>
+          <div className="rounded-xl bg-emerald-50 p-4"><p className="text-xs font-medium text-emerald-800">Completed Orders</p><p className="mt-1 text-xl font-bold font-[DM_Mono] text-emerald-950">{marketplaceSummary.completedOrders}</p></div>
+          <div className="rounded-xl bg-amber-50 p-4"><p className="text-xs font-medium text-amber-800">Pending Orders</p><p className="mt-1 text-xl font-bold font-[DM_Mono] text-amber-950">{marketplaceSummary.pendingOrders}</p></div>
+          <div className="rounded-xl bg-rose-50 p-4"><p className="text-xs font-medium text-rose-800">Cancelled Orders</p><p className="mt-1 text-xl font-bold font-[DM_Mono] text-rose-950">{marketplaceSummary.cancelledOrders}</p></div>
         </div>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+          {[
+            ['Total marketplace orders',marketplaceSummary.totalOrders],
+            ['Total order value',fmtMarketplace(marketplaceSummary.totalOrderValue)],
+            ['Total marketplace revenue (paid gross)',fmtMarketplace(marketplaceSummary.completedSales)],
+            ['Completed marketplace sales',fmtMarketplace(marketplaceSummary.completedSales)],
+            ['Completed orders',marketplaceSummary.completedOrders],
+            ['Pending fulfillment amount',fmtMarketplace(marketplaceSummary.pendingFulfillmentAmount)],
+            ['Pending orders',marketplaceSummary.pendingOrders],
+            ['Pending order value',fmtMarketplace(marketplaceSummary.pendingOrderValue)],
+            ['Processing orders',marketplaceSummary.processingOrders],
+            ['Delivered orders',marketplaceSummary.deliveredOrders],
+            ['Cancelled orders',marketplaceSummary.cancelledOrders],
+            ['Cancelled order value',fmtMarketplace(marketplaceSummary.cancelledOrderValue)],
+            ['Archived orders',marketplaceSummary.archivedOrders],
+            ['Refunds',fmtMarketplace(marketplaceSummary.refunds)],
+            ['Refunds missing amount',marketplaceSummary.unquantifiedRefunds],
+            ['Net marketplace sales',fmtMarketplace(marketplaceSummary.netMarketplaceSales)],
+            ['Platform commission',fmtMarketplace(marketplaceSummary.recordedCommission)],
+            ['Shopkeeper net after commission',fmtMarketplace(marketplaceSummary.shopkeeperNetAfterCommission)],
+          ].map(([label,value])=><div key={String(label)} className="rounded-lg border border-slate-100 bg-slate-50 p-3"><p className="text-[11px] leading-4 text-muted-foreground">{label}</p><p className="mt-1 text-base font-semibold font-[DM_Mono] text-foreground">{value}</p></div>)}
+        </div>
+        <div className="overflow-hidden rounded-lg border border-border">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-muted/40 px-3 py-2"><h4 className="text-sm font-semibold">Recent marketplace transactions</h4><div className="flex flex-wrap gap-2"><input aria-label="Search marketplace transactions" className="rounded-md border border-border bg-background px-2 py-1.5 text-xs" placeholder="Search order, customer, product" value={marketplaceTransactionSearch} onChange={event=>setMarketplaceTransactionSearch(event.target.value)}/><select aria-label="Filter marketplace transactions by status" className="rounded-md border border-border bg-background px-2 py-1.5 text-xs" value={marketplaceTransactionStatus} onChange={event=>setMarketplaceTransactionStatus(event.target.value)}><option value="all">All statuses</option><option value="pending">Pending</option><option value="processing">Processing</option><option value="delivered">Delivered</option><option value="cancelled">Cancelled / rejected</option><option value="refunded">Refunded</option><option value="archived">Archived</option></select></div></div>
+          {marketplaceOrdersLoading?<p className="p-4 text-sm text-muted-foreground">Loading this shop’s marketplace orders…</p>:marketplaceOrdersError?<p className="p-4 text-sm text-red-700">Marketplace orders could not be loaded.</p>:marketplaceSummary.orders.length===0?<p className="p-4 text-sm text-muted-foreground">No marketplace orders in this date range.</p>:marketplaceTransactions.length===0?<p className="p-4 text-sm text-muted-foreground">No marketplace transactions match the search and status filters.</p>:<div className="max-h-80 overflow-auto"><table className="w-full min-w-[700px] text-left text-xs"><thead className="sticky top-0 bg-white text-muted-foreground"><tr>{['Order ID','Customer','Products','Order date','Order amount','Payment method','Payment','Fulfillment',''].map(label=><th key={label} className="px-3 py-2 font-medium">{label}</th>)}</tr></thead><tbody className="divide-y divide-border">{marketplaceTransactions.slice().sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).slice(0,12).map(order=><tr key={order.id} className="hover:bg-muted/30"><td className="px-3 py-2 font-medium"><button className="text-primary hover:underline" onClick={()=>onOpenMarketplaceOrder?.(order.id)}>#{order.orderNumber}</button></td><td className="px-3 py-2">{order.customerName}</td><td className="max-w-44 truncate px-3 py-2">{order.items.map(item=>`${item.quantity}× ${item.productName}`).join(', ')}</td><td className="px-3 py-2">{new Date(order.createdAt).toLocaleDateString()}</td><td className="px-3 py-2 font-[DM_Mono]">{fmtMarketplace(order.totalAmount/100)}</td><td className="px-3 py-2 capitalize">{order.paymentMethod.replace(/_/g,' ')}</td><td className="px-3 py-2 capitalize">{order.paymentStatus}</td><td className="px-3 py-2 capitalize">{order.status.replace(/_/g,' ')}</td><td className="px-3 py-2"><button className="text-primary hover:underline" onClick={()=>onOpenMarketplaceOrder?.(order.id)}>View</button></td></tr>)}</tbody></table></div>}
+        </div>
+        <p className="text-[11px] text-muted-foreground">Completed sales require a delivered order and completed (or subsequently refunded) payment. Refunded totals use the recorded refund amount when present; refunded records without a recorded amount are excluded and flagged. Shopkeeper net subtracts recorded marketplace commission; customer order value is not presented as seller earnings.</p>
       </section>
 
       {lowStock > 0 && (
@@ -4391,118 +4452,788 @@ function ReportsView({ invoices, products, customers }: {
 function BackupView(_props: any) { return <ComingSoonView title="Data Backup" icon={HardDrive} desc="Schedule automatic backups of all your business data. Restore anytime with one click." />; }
 function SyncView(_props: any) { return <ComingSoonView title="Sync" icon={Globe} desc="Sync your data across multiple devices or share with your accountant securely." />; }
 
-function BarcodeView({ products }: { products: Product[] }) {
-  const [barcodeValue, setBarcodeValue] = useState("8901234567890");
-  const [labelText, setLabelText] = useState("Product Name");
-  const [mrp, setMrp] = useState("");
-  const [qty, setQty] = useState(1);
-  const [paperSize, setPaperSize] = useState("A4");
-  const [labelSize, setLabelSize] = useState("medium");
-  const [scanInput, setScanInput] = useState("");
-  const [scanResult, setScanResult] = useState<{ code: string; product: Product | null } | null>(null);
-  const handleScan = (raw: string) => {
-    const code = normalizeScanCode(raw);
-    if (!code) return;
-    const product = products.find((p) => normalizeScanCode(p.barcode) === code || normalizeScanCode(p.sku) === code) || null;
-    setScanResult({ code, product });
-    setBarcodeValue(product ? product.barcode : code);
-    if (product) { setLabelText(product.name); setMrp(String(product.price)); }
-    setScanInput("");
+function escapeHtml(value: string) {
+  const map: Record<string, string> = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
   };
+  return value.replace(/[&<>"']/g, (char) => map[char] ?? char);
+}
+
+function buildBarcodeSvgMarkup(value: string, format: BarcodeFormat = detectBarcodeFormat(value), displayValue = true): string {
+  const clean = sanitizeBarcodeValue(value);
+  if (!clean) return "";
+
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  try {
+    JsBarcode(svg, clean, {
+      format,
+      displayValue,
+      background: '#ffffff',
+      lineColor: '#0f172a',
+      width: 1.8,
+      height: 48,
+      margin: 8,
+      fontSize: 12,
+      textMargin: 6,
+      flat: true,
+      font: 'DM Mono, monospace',
+    });
+    const intrinsicWidth = Number.parseFloat(svg.getAttribute('width') || '0');
+    const intrinsicHeight = Number.parseFloat(svg.getAttribute('height') || '0');
+    if (intrinsicWidth > 0 && intrinsicHeight > 0) {
+      svg.setAttribute('viewBox', `0 0 ${intrinsicWidth} ${intrinsicHeight}`);
+      svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+      svg.setAttribute('width', '100%');
+      svg.setAttribute('height', '100%');
+    }
+  } catch {
+    const fallback = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    fallback.setAttribute('x', '110');
+    fallback.setAttribute('y', '50');
+    fallback.setAttribute('text-anchor', 'middle');
+    fallback.setAttribute('font-size', '12');
+    fallback.setAttribute('font-family', 'DM Mono,monospace');
+    fallback.textContent = clean;
+    svg.appendChild(fallback);
+  }
+
+  return svg.outerHTML;
+}
+
+function buildPrintDocument({
+  items,
+  mode,
+  layoutPreset,
+  customColumns,
+  customRows,
+  thermalWidthMm,
+  thermalHeightMm,
+  thermalGapMm,
+  calibrationXmm,
+  calibrationYmm,
+  printBoundaries,
+}: {
+  items: Array<{ name: string; code: string; price: string; sku?: string; format: BarcodeFormat }>;
+  mode: 'a4' | 'thermal';
+  layoutPreset: A4LayoutPreset | 'custom';
+  customColumns: number;
+  customRows: number;
+  thermalWidthMm: number;
+  thermalHeightMm: number;
+  thermalGapMm: number;
+  calibrationXmm: number;
+  calibrationYmm: number;
+  printBoundaries: boolean;
+}): string {
+  const resolvedLayout = mode === 'a4'
+    ? buildA4LayoutConfig(layoutPreset, customColumns, customRows)
+    : { columns: 1, rows: 1, labelCount: 1, description: 'Thermal roll' };
+
+  const labelMarkup = items.map((item) => {
+    const barcodeMarkup = buildBarcodeSvgMarkup(item.code, item.format, false);
+    const skuText = item.sku ? `<span class="label-sku">SKU: ${escapeHtml(item.sku)}</span>` : '';
+    const priceText = item.price && item.price !== '0' ? `<span class="label-price">₹${escapeHtml(item.price)}</span>` : '';
+    return `
+      <div class="label-card">
+        <div class="label-name">${escapeHtml(item.name)}</div>
+        ${barcodeMarkup}
+        <div class="label-human-code">${escapeHtml(item.code)}</div>
+        <div class="label-meta">
+          ${skuText}
+          ${priceText}
+        </div>
+      </div>`;
+  }).join('');
+
+  const exactForty = mode === 'a4' && layoutPreset === '40';
+  const layoutColumns = mode === 'a4' ? resolvedLayout.columns : 1;
+  const labelHeight = mode === 'a4' ? '42mm' : `${thermalHeightMm}mm`;
+  const gap = mode === 'a4' ? '2mm' : `${thermalGapMm}mm`;
+  const sheets = mode === 'a4'
+    ? Array.from({ length: Math.max(1, Math.ceil(items.length / resolvedLayout.labelCount)) }, (_, index) => {
+        const pageItems = items.slice(index * resolvedLayout.labelCount, (index + 1) * resolvedLayout.labelCount);
+        const pageMarkup = pageItems.map((item) => {
+          const barcodeMarkup = buildBarcodeSvgMarkup(item.code, item.format, false);
+          const skuText = item.sku ? `<span class="label-sku">SKU: ${escapeHtml(item.sku)}</span>` : '';
+          const priceText = item.price && item.price !== '0' ? `<span class="label-price">₹${escapeHtml(item.price)}</span>` : '';
+          return `<div class="label-card"><div class="label-name">${escapeHtml(item.name)}</div>${barcodeMarkup}<div class="label-human-code">${escapeHtml(item.code)}</div><div class="label-meta">${skuText}${priceText}</div></div>`;
+        });
+        while (pageMarkup.length < resolvedLayout.labelCount) pageMarkup.push('<div class="label-card label-empty"></div>');
+        return `<section class="print-sheet ${exactForty ? 'exact-40' : 'standard-sheet'}"><div class="print-grid">${pageMarkup.join('')}</div></section>`;
+      }).join('')
+    : `<section class="print-sheet thermal-sheet"><div class="print-grid">${labelMarkup}</div></section>`;
+
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Barcode Labels</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; background: #ffffff; font-family: Arial, sans-serif; color: #111827; }
+      body { padding: ${exactForty ? '0' : '8mm'}; }
+      .print-sheet { page-break-after: always; break-after: page; }
+      .print-sheet:last-child { page-break-after: auto; break-after: auto; }
+      .print-sheet.exact-40 { width: ${A4_40_LABEL_DIMENSIONS.paperWidthMm}mm; height: ${A4_40_LABEL_DIMENSIONS.paperHeightMm}mm; overflow: hidden; }
+      .print-grid {
+        display: grid;
+        grid-template-columns: repeat(${layoutColumns}, minmax(0, 1fr));
+        gap: ${gap};
+        width: 100%;
+        transform: translate(${calibrationXmm}mm, ${calibrationYmm}mm);
+      }
+      .exact-40 .print-grid {
+        width: ${A4_40_LABEL_DIMENSIONS.paperWidthMm}mm;
+        height: ${A4_40_LABEL_DIMENSIONS.paperHeightMm}mm;
+        grid-template-columns: repeat(${A4_40_LABEL_DIMENSIONS.columns}, ${A4_40_LABEL_DIMENSIONS.labelWidthMm}mm);
+        grid-template-rows: repeat(${A4_40_LABEL_DIMENSIONS.rows}, ${A4_40_LABEL_DIMENSIONS.labelHeightMm}mm);
+        grid-auto-rows: ${A4_40_LABEL_DIMENSIONS.labelHeightMm}mm;
+        gap: ${A4_40_LABEL_DIMENSIONS.gapMm}mm;
+      }
+      .label-card {
+        border: ${printBoundaries ? '0.2mm solid #94a3b8' : '0'};
+        border-radius: 0;
+        padding: ${exactForty ? '1.4mm' : mode === 'a4' ? '2.5mm' : '1.5mm'};
+        overflow: hidden;
+        min-width: 0;
+        min-height: ${exactForty ? '0' : labelHeight};
+        ${exactForty ? `width:${A4_40_LABEL_DIMENSIONS.labelWidthMm}mm;height:${A4_40_LABEL_DIMENSIONS.labelHeightMm}mm;` : ''}
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: #ffffff;
+        page-break-inside: avoid;
+      }
+      .label-card > svg {
+        display: block;
+        width: 100%;
+        height: auto;
+        max-width: 100%;
+        max-height: ${exactForty ? '13mm' : mode === 'a4' ? '22mm' : '18mm'};
+        transform: none;
+        writing-mode: horizontal-tb;
+        object-fit: contain;
+        flex: 0 1 auto;
+      }
+      .label-name {
+        width: 100%;
+        font-size: ${exactForty ? '8px' : '7px'};
+        font-weight: 700;
+        line-height: 1.2;
+        margin-bottom: 1mm;
+        text-align: center;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .label-human-code, .label-sku {
+        font-size: ${exactForty ? '7px' : '6px'};
+        font-family: "DM Mono", monospace;
+        text-align: center;
+        color: #475569;
+        white-space: nowrap;
+        writing-mode: horizontal-tb;
+        text-orientation: mixed;
+        transform: none;
+        overflow: hidden;
+        max-width: 100%;
+      }
+      .label-human-code { margin-top: 0.5mm; }
+      .label-price {
+        font-size: 7px;
+        font-weight: 700;
+        color: #111827;
+      }
+      .label-meta {
+        width: 100%;
+        margin-top: ${exactForty ? '0.6mm' : '1.2mm'};
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 2mm;
+        writing-mode: horizontal-tb;
+        transform: none;
+      }
+      .label-meta .label-sku { text-align: left; }
+      .label-meta .label-price { margin-left: auto; white-space: nowrap; }
+      @media print {
+        @page { size: ${mode === 'a4' ? 'A4 portrait' : `${thermalWidthMm}mm ${thermalHeightMm}mm`}; margin: 0; }
+        html, body { margin: 0 !important; padding: 0 !important; width: ${mode === 'a4' ? '210mm' : `${thermalWidthMm}mm`}; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        .label-card, .label-card * { writing-mode: horizontal-tb; text-orientation: mixed; }
+        .label-card > svg { transform: none !important; }
+        .label-card { break-inside: avoid; }
+        .print-sheet.exact-40 { width: ${A4_40_LABEL_DIMENSIONS.paperWidthMm}mm; height: ${A4_40_LABEL_DIMENSIONS.paperHeightMm}mm; overflow: hidden; }
+        .print-sheet.exact-40 .print-grid { width: ${A4_40_LABEL_DIMENSIONS.paperWidthMm}mm; height: ${A4_40_LABEL_DIMENSIONS.paperHeightMm}mm; transform: translate(${calibrationXmm}mm, ${calibrationYmm}mm); }
+        .print-sheet.exact-40 .label-card { width: ${A4_40_LABEL_DIMENSIONS.labelWidthMm}mm; height: ${A4_40_LABEL_DIMENSIONS.labelHeightMm}mm; min-height: 0; }
+        .label-empty { visibility: hidden; }
+      }
+    </style>
+  </head>
+  <body>
+    ${sheets}
+  </body>
+</html>`;
+}
+
+function BarcodeGraphic({ value, format }: { value: string; format: BarcodeFormat }) {
+  const [svgMarkup, setSvgMarkup] = useState('');
+
+  useEffect(() => {
+    setSvgMarkup(buildBarcodeSvgMarkup(value, format, false));
+  }, [value, format]);
+
+  return (
+    <div className="barcode-graphic" style={{ width: '100%', aspectRatio: '2.5 / 1', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }} dangerouslySetInnerHTML={{ __html: svgMarkup }} />
+  );
+}
+
+function BarcodeView({ products, setProducts }: { products: Product[]; setProducts: (v: Product[] | ((p: Product[]) => Product[])) => void; }) {
+  const [search, setSearch] = useState('');
+  const [selectedProductIds, setSelectedProductIds] = useState<number[]>([]);
+  const [productQuantities, setProductQuantities] = useState<Record<number, number>>({});
+  const [manualBarcode, setManualBarcode] = useState('8901234567890');
+  const [manualLabel, setManualLabel] = useState('Product Name');
+  const [manualPrice, setManualPrice] = useState('');
+  const [manualFormat, setManualFormat] = useState<'auto' | BarcodeFormat>('auto');
+  const [paperMode, setPaperMode] = useState<'a4' | 'thermal'>('a4');
+  const [layoutPreset, setLayoutPreset] = useState<A4LayoutPreset | 'custom'>('40');
+  const [customColumns, setCustomColumns] = useState(4);
+  const [customRows, setCustomRows] = useState(6);
+  const [thermalWidthMm, setThermalWidthMm] = useState(48);
+  const [thermalHeightMm, setThermalHeightMm] = useState(28);
+  const [thermalGapMm, setThermalGapMm] = useState(2);
+  const [calibrationXmm, setCalibrationXmm] = useState(0);
+  const [calibrationYmm, setCalibrationYmm] = useState(0);
+  const [printBoundaries, setPrintBoundaries] = useState(false);
+  const [showPrintPreview, setShowPrintPreview] = useState(false);
+  const [previewSheet, setPreviewSheet] = useState(0);
+  const [showQuickAdd, setShowQuickAdd] = useState(false);
+  const [quickAddForm, setQuickAddForm] = useState({
+    name: '',
+    sku: '',
+    barcode: '',
+    price: '',
+    costPrice: '',
+    stock: '1',
+    unit: 'Packet',
+    category: 'General',
+  });
+
+  const filteredProducts = products.filter((product) => {
+    const needle = search.trim().toLowerCase();
+    if (!needle) return true;
+    return product.name.toLowerCase().includes(needle) || product.sku.toLowerCase().includes(needle) || product.barcode.toLowerCase().includes(needle);
+  });
+
+  const selectedProducts = products.filter((product) => selectedProductIds.includes(product.id));
+  const activeBarcodeFormat = manualFormat === 'auto' ? detectBarcodeFormat(manualBarcode) : manualFormat;
+  const barcodeValid = manualBarcode ? isValidBarcodeValue(manualBarcode, activeBarcodeFormat) : false;
+  const manualProduct = products.find((product) => sanitizeBarcodeValue(product.barcode) === sanitizeBarcodeValue(manualBarcode));
+
+  const productPrintItems = selectedProducts.map((product) => ({
+    name: product.name,
+    code: sanitizeBarcodeValue(product.barcode) || `SKU-${product.id}`,
+    price: String(product.price),
+    sku: product.sku,
+    format: detectBarcodeFormat(product.barcode),
+    quantity: Math.max(1, productQuantities[product.id] ?? 1),
+  }));
+
+  const printItems = productPrintItems.length > 0
+    ? productPrintItems.flatMap((item) => Array.from({ length: item.quantity }, () => ({
+        name: item.name,
+        code: item.code,
+        price: item.price,
+        sku: item.sku,
+        format: item.format,
+      })))
+    : [{
+        name: manualLabel || 'Custom product',
+        code: sanitizeBarcodeValue(manualBarcode) || '8901234567890',
+        price: manualPrice || '0',
+        sku: manualProduct?.sku || '',
+        format: activeBarcodeFormat,
+      }];
+
+  const layoutConfig = paperMode === 'a4'
+    ? buildA4LayoutConfig(layoutPreset, customColumns, customRows)
+    : { columns: 1, rows: 1, labelCount: 1, description: 'Thermal roll' };
+  const totalPrintSheets = paperMode === 'a4'
+    ? Math.max(1, Math.ceil(printItems.length / layoutConfig.labelCount))
+    : Math.max(1, printItems.length);
+  const previewItems = paperMode === 'a4'
+    ? printItems.slice(previewSheet * layoutConfig.labelCount, (previewSheet + 1) * layoutConfig.labelCount)
+    : printItems.slice(previewSheet, previewSheet + 1);
+
+  const handleScan = (raw: string) => {
+    const code = sanitizeBarcodeValue(raw);
+    if (!code) return;
+    const product = products.find((candidate) => sanitizeBarcodeValue(candidate.barcode) === code || sanitizeBarcodeValue(candidate.sku) === code) || null;
+    setManualBarcode(code);
+    setManualLabel(product?.name || manualLabel || 'Product Name');
+    setManualPrice(product ? String(product.price) : manualPrice);
+    if (product) {
+      setSelectedProductIds((previous) => previous.includes(product.id) ? previous : [...previous, product.id]);
+      setProductQuantities((previous) => ({ ...previous, [product.id]: previous[product.id] ?? 1 }));
+    }
+  };
+
   useHardwareScanner(handleScan);
 
-  const labelSizes = { small: { w: "38mm", h: "13mm", label: "Small (38×13mm)" }, medium: { w: "50mm", h: "25mm", label: "Medium (50×25mm)" }, large: { w: "100mm", h: "50mm", label: "Large (100×50mm)" } };
-  const cols = paperSize === "A4" ? Math.floor(210 / parseFloat(labelSizes[labelSize as keyof typeof labelSizes].w)) : 3;
+  const toggleSelectedProduct = (product: Product) => {
+    setSelectedProductIds((previous) => {
+      const alreadySelected = previous.includes(product.id);
+      return alreadySelected ? previous.filter((id) => id !== product.id) : [...previous, product.id];
+    });
+    setProductQuantities((previous) => ({ ...previous, [product.id]: previous[product.id] ?? 1 }));
+  };
+
+  const updateSelectedQuantity = (productId: number, quantity: number) => {
+    setProductQuantities((previous) => ({
+      ...previous,
+      [productId]: Math.max(1, Number.isFinite(quantity) ? quantity : 1),
+    }));
+  };
 
   const handlePrint = () => {
-    const win = window.open("", "_blank");
-    if (!win) return;
-    const sz = labelSizes[labelSize as keyof typeof labelSizes];
-    const labels = Array(qty).fill(null).map(() => `<div class="label"><p class="name">${labelText}</p><svg width="100%" height="28" viewBox="0 0 220 38">${generateSVGBars(barcodeValue)}</svg>${mrp ? `<p class="mrp">MRP: ₹${mrp}</p>` : ""}<p class="bc">${barcodeValue}</p></div>`).join("");
-    win.document.write(`<html><head><title>Labels</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:sans-serif}.grid{display:grid;grid-template-columns:repeat(${cols},1fr);gap:3mm;padding:8mm}.label{border:.5px solid #ccc;padding:1.5mm;width:${sz.w};height:${sz.h};overflow:hidden;display:flex;flex-direction:column;justify-content:center;align-items:center}.name{font-size:7px;font-weight:600;text-align:center;margin-bottom:.5mm}.mrp{font-size:7px;font-weight:700;margin-top:.5mm}.bc{font-size:6px;font-family:monospace}@media print{body{margin:0}}</style></head><body><div class="grid">${labels}</div></body></html>`);
+    if (!printItems.length) {
+      window.alert('Select at least one product or enter a barcode value.');
+      return;
+    }
+
+    const win = window.open('', '_blank', 'noopener,noreferrer');
+    if (!win) {
+      window.alert('Your browser blocked the print preview. Please allow pop-ups and try again.');
+      return;
+    }
+
+    win.document.write(buildPrintDocument({
+      items: printItems.map((item) => ({
+        name: item.name,
+        code: sanitizeBarcodeValue(item.code) || item.code,
+        price: item.price,
+        sku: item.sku,
+        format: item.format,
+      })),
+      mode: paperMode,
+      layoutPreset,
+      customColumns,
+      customRows,
+      thermalWidthMm,
+      thermalHeightMm,
+      thermalGapMm,
+      calibrationXmm,
+      calibrationYmm,
+      printBoundaries,
+    }));
     win.document.close();
-    setTimeout(() => win.print(), 400);
+    setTimeout(() => win.print(), 250);
+  };
+
+  const handleQuickAdd = () => {
+    if (!quickAddForm.name.trim()) {
+      window.alert('Enter a product name before adding it to inventory.');
+      return;
+    }
+
+    const nextId = Date.now();
+    const normalizedSku = quickAddForm.sku.trim() || `SKU-${nextId}`;
+    const normalizedBarcode = sanitizeBarcodeValue(quickAddForm.barcode) || `89${nextId}`;
+    if (products.some((product) => product.sku.trim().toLowerCase() === normalizedSku.toLowerCase())) {
+      window.alert("That SKU already exists in inventory.");
+      return;
+    }
+    if (products.some((product) => sanitizeBarcodeValue(product.barcode) === normalizedBarcode)) {
+      window.alert("That barcode already exists in inventory.");
+      return;
+    }
+    const product: Product = {
+      id: nextId,
+      name: quickAddForm.name.trim(),
+      sku: normalizedSku,
+      barcode: normalizedBarcode,
+      price: Number(quickAddForm.price) || 0,
+      costPrice: Number(quickAddForm.costPrice) || 0,
+      stock: Number(quickAddForm.stock) || 0,
+      unit: quickAddForm.unit.trim() || 'Packet',
+      category: quickAddForm.category.trim() || 'General',
+    };
+
+    setProducts((current) => [...current, product]);
+    setSelectedProductIds((previous) => [...previous, nextId]);
+    setProductQuantities((previous) => ({ ...previous, [nextId]: 1 }));
+    setManualBarcode(normalizedBarcode);
+    setManualLabel(product.name);
+    setManualPrice(String(product.price));
+    setShowQuickAdd(false);
+    setQuickAddForm({ name: '', sku: '', barcode: '', price: '', costPrice: '', stock: '1', unit: 'Packet', category: 'General' });
   };
 
   return (
     <div className="space-y-4">
       <div className="bg-card rounded-xl p-5 border border-border shadow-sm space-y-3">
-        <h3 className="font-semibold text-foreground flex items-center gap-2"><QrCode className="w-4 h-4" /> Scan Barcode</h3>
-        <p className="text-xs text-muted-foreground">Use a USB/Bluetooth barcode scanner, or tap the camera icon on mobile/tablet.</p>
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="font-semibold text-foreground flex items-center gap-2"><QrCode className="w-4 h-4" /> Scan Barcode</h3>
+          <button
+            type="button"
+            onClick={() => setShowQuickAdd(true)}
+            className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:border-primary/40 hover:text-foreground"
+          >
+            <Plus className="w-3.5 h-3.5" /> Add product
+          </button>
+        </div>
+        <p className="text-xs text-muted-foreground">Use a USB/Bluetooth scanner, type a code, or pick an item from inventory.</p>
         <div className="flex gap-2">
           <input
-            value={scanInput}
-            onChange={(e) => setScanInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleScan(scanInput)}
+            value={manualBarcode}
+            onChange={(event) => setManualBarcode(sanitizeBarcodeValue(event.target.value))}
+            onKeyDown={(event) => event.key === 'Enter' && handleScan(manualBarcode)}
             placeholder="Scan or type barcode / SKU"
             className="flex-1 min-w-0 px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
           />
-          <button onClick={() => handleScan(scanInput)} className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors">Find</button>
+          <button onClick={() => handleScan(manualBarcode)} className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors">Find</button>
           <CameraScanButton label="" title="Scan with camera" onDetected={handleScan} />
         </div>
-        {scanResult && (
-          <p className={`text-xs ${scanResult.product ? "text-emerald-600" : "text-amber-600"}`}>
-            {scanResult.product
-              ? `Found: ${scanResult.product.name} (${scanResult.code}) · stock ${scanResult.product.stock} · ${fmt(scanResult.product.price)}`
-              : `No registered product for ${scanResult.code}. Loaded into the label generator below.`}
+        {manualBarcode && (
+          <p className={`text-xs ${barcodeValid ? 'text-emerald-600' : 'text-amber-600'}`}>
+            {barcodeValid
+              ? `Detected ${activeBarcodeFormat} format for ${manualBarcode}.`
+              : `Barcode format warning: ${manualBarcode} is not a valid ${activeBarcodeFormat} value.`}
           </p>
         )}
       </div>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+      <div className="grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-4">
         <div className="bg-card rounded-xl p-5 border border-border shadow-sm space-y-4">
-          <h3 className="font-semibold text-foreground">Barcode Generator</h3>
-          {[["Barcode Value", barcodeValue, (v: string) => setBarcodeValue(v), "text"], ["Product Label", labelText, (v: string) => setLabelText(v), "text"], ["MRP (₹)", mrp, (v: string) => setMrp(v), "number"]].map(([label, val, setter, type]) => (
-            <div key={label as string}>
-              <label className="block text-xs font-medium text-muted-foreground mb-1">{label as string}</label>
-              <input type={type as string} value={val as string} onChange={(e) => (setter as (v: string) => void)(e.target.value)}
-                className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm font-[DM_Mono] focus:outline-none focus:ring-2 focus:ring-primary/30" />
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="font-semibold text-foreground">Inventory items</h3>
+            <div className="relative w-full max-w-[220px]">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search products"
+                className="w-full pl-8 pr-3 py-2 bg-background border border-border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/30"
+              />
             </div>
-          ))}
-          <div className="p-6 bg-white rounded-xl border border-border flex flex-col items-center gap-2 shadow-inner">
-            <p className="text-xs font-semibold text-foreground">{labelText}</p>
-            <BarcodeDisplay value={barcodeValue} height={60} />
-            {mrp && <p className="text-xs font-bold text-foreground">MRP: ₹{mrp}</p>}
           </div>
-          <button onClick={() => navigator.clipboard?.writeText(barcodeValue)} className="w-full flex items-center justify-center gap-2 py-2 border border-border rounded-lg text-xs text-muted-foreground hover:bg-muted transition-colors">
-            <Copy className="w-3.5 h-3.5" /> Copy Barcode Value
-          </button>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {filteredProducts.length === 0 ? (
+              <div className="col-span-full rounded-xl border border-dashed border-border bg-background/50 p-6 text-center text-xs text-muted-foreground">
+                No matching products. Add one to inventory or type a barcode manually.
+              </div>
+            ) : (
+              filteredProducts.map((product) => {
+                const selected = selectedProductIds.includes(product.id);
+                const quantity = productQuantities[product.id] ?? 1;
+                return (
+                  <button
+                    key={product.id}
+                    type="button"
+                    onClick={() => toggleSelectedProduct(product)}
+                    className={`text-left rounded-xl border p-3 transition-all ${selected ? 'border-primary bg-primary/5 shadow-sm' : 'border-border bg-background hover:border-primary/30'}`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-foreground truncate">{product.name}</div>
+                        <div className="mt-1 text-[11px] text-muted-foreground font-[DM_Mono]">{product.sku}</div>
+                      </div>
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${selected ? 'bg-primary text-primary-foreground' : 'bg-slate-100 text-slate-600'}`}>
+                        {selected ? 'Selected' : 'Add'}
+                      </span>
+                    </div>
+                    <div className="mt-3 flex items-center justify-between text-[11px] text-muted-foreground">
+                      <span>{product.stock} in stock</span>
+                      <span>₹{product.price}</span>
+                    </div>
+                    <div className="mt-3 flex items-center gap-2">
+                      <input
+                        type="number"
+                        min={1}
+                        max={500}
+                        value={quantity}
+                        onClick={(event) => event.stopPropagation()}
+                        onChange={(event) => {
+                          event.stopPropagation();
+                          updateSelectedQuantity(product.id, Number(event.target.value) || 1);
+                        }}
+                        className="w-16 px-2 py-1 border border-border rounded-md bg-background text-xs font-[DM_Mono] text-center focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      />
+                      <span className="text-[10px] text-muted-foreground">labels</span>
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
         </div>
 
         <div className="bg-card rounded-xl p-5 border border-border shadow-sm space-y-4">
-          <h3 className="font-semibold text-foreground">Print Labels</h3>
-          <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-2">Number of Labels: <span className="text-foreground font-semibold">{qty}</span></label>
-            <div className="flex items-center gap-3">
-              <button onClick={() => setQty((q) => Math.max(1, q - 1))} className="w-9 h-9 rounded-lg border border-border flex items-center justify-center text-lg text-muted-foreground hover:bg-muted transition-colors">−</button>
-              <input type="number" value={qty} min={1} max={500} onChange={(e) => setQty(Math.min(500, Math.max(1, +e.target.value)))} className="flex-1 px-3 py-2 bg-background border border-border rounded-lg text-sm text-center font-[DM_Mono] focus:outline-none focus:ring-2 focus:ring-primary/30" />
-              <button onClick={() => setQty((q) => Math.min(500, q + 1))} className="w-9 h-9 rounded-lg border border-border flex items-center justify-center text-lg text-muted-foreground hover:bg-muted transition-colors">+</button>
+          <h3 className="font-semibold text-foreground">Barcode generator</h3>
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs font-medium text-muted-foreground mb-1">Barcode value</label>
+              <input
+                value={manualBarcode}
+                onChange={(event) => setManualBarcode(sanitizeBarcodeValue(event.target.value))}
+                className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm font-[DM_Mono] focus:outline-none focus:ring-2 focus:ring-primary/30"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-muted-foreground mb-1">Format</label>
+              <select
+                value={manualFormat}
+                onChange={(event) => setManualFormat(event.target.value as 'auto' | BarcodeFormat)}
+                className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+              >
+                <option value="auto">Auto</option>
+                <option value="EAN13">EAN-13</option>
+                <option value="EAN8">EAN-8</option>
+                <option value="CODE128">Code 128</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-muted-foreground mb-1">Label text</label>
+              <input
+                value={manualLabel}
+                onChange={(event) => setManualLabel(event.target.value)}
+                className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-muted-foreground mb-1">MRP (₹)</label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={manualPrice}
+                onChange={(event) => setManualPrice(event.target.value)}
+                className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+              />
             </div>
           </div>
-          <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-2">Paper Size</label>
-            <div className="grid grid-cols-3 gap-2">{["A4", "A5", "4×6 Thermal"].map((s) => <button key={s} onClick={() => setPaperSize(s)} className={`py-2 rounded-lg text-xs font-medium border transition-all ${paperSize === s ? "bg-primary text-primary-foreground border-primary" : "border-border text-muted-foreground hover:border-primary/30"}`}>{s}</button>)}</div>
+
+          <div className="rounded-xl border border-border bg-white p-4 text-center">
+            <p className="text-xs font-semibold text-foreground mb-2">{manualLabel || 'Product'}</p>
+            {manualBarcode ? (
+              <BarcodeGraphic value={manualBarcode} format={activeBarcodeFormat} />
+            ) : (
+              <div className="text-xs text-muted-foreground py-8">No barcode value entered.</div>
+            )}
+            {manualBarcode && <p className="mt-1 font-mono text-xs text-slate-600">{manualBarcode}</p>}
+            {manualProduct?.sku && <p className="mt-1 text-xs text-slate-500">SKU: {manualProduct.sku}</p>}
+            {manualPrice && <p className="mt-2 text-xs font-bold text-foreground">MRP: ₹{manualPrice}</p>}
           </div>
-          <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-2">Label Size</label>
-            <div className="space-y-1.5">{Object.entries(labelSizes).map(([key, val]) => <label key={key} className={`flex items-center gap-3 p-2.5 rounded-lg border cursor-pointer transition-all ${labelSize === key ? "border-primary bg-primary/5" : "border-border hover:border-primary/30"}`}><input type="radio" name="lsize" value={key} checked={labelSize === key} onChange={() => setLabelSize(key)} className="accent-primary" /><span className="text-sm text-foreground">{val.label}</span></label>)}</div>
-          </div>
-          <button onClick={handlePrint} className="w-full flex items-center justify-center gap-2 py-3 bg-primary text-primary-foreground rounded-xl text-sm font-medium hover:bg-primary/90 transition-colors shadow-sm">
-            <Printer className="w-4 h-4" /> Print {qty} Label{qty !== 1 ? "s" : ""}
-          </button>
         </div>
       </div>
 
-      {products.length > 0 && (
-        <div className="bg-card rounded-xl p-5 border border-border shadow-sm">
-          <h3 className="font-semibold text-foreground mb-3">Generate from Inventory</h3>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
-            {products.map((p) => (
-              <button key={p.id} onClick={() => { setBarcodeValue(p.barcode); setLabelText(p.name); setMrp(String(p.price)); }}
-                className="text-left p-3 rounded-lg border border-border hover:border-primary/40 hover:bg-primary/5 transition-all">
-                <p className="text-xs font-semibold text-foreground truncate">{p.name}</p>
-                <p className="text-xs text-muted-foreground font-[DM_Mono] mt-0.5 truncate">{p.barcode}</p>
+      <div className="bg-card rounded-xl p-5 border border-border shadow-sm space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="font-semibold text-foreground">Print settings</h3>
+          <button
+            type="button"
+            onClick={() => { setPreviewSheet(0); setShowPrintPreview(true); }}
+            className="inline-flex items-center gap-2 rounded-xl bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+          >
+            <Eye className="w-3.5 h-3.5" /> Preview sheet
+          </button>
+          <button type="button" onClick={handlePrint} className="inline-flex items-center gap-2 rounded-xl border border-border px-3 py-2 text-xs font-medium hover:bg-muted">
+            <Printer className="w-3.5 h-3.5" /> Print
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <div className="space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-muted-foreground mb-2">Paper mode</label>
+              <div className="grid grid-cols-2 gap-2">
+                {([['A4', 'a4'], ['Thermal roll', 'thermal']] as const).map(([label, modeKey]) => (
+                  <button key={modeKey} type="button" onClick={() => setPaperMode(modeKey)} className={`py-2 rounded-lg text-xs font-medium border transition-all ${paperMode === modeKey ? 'bg-primary text-primary-foreground border-primary' : 'border-border text-muted-foreground hover:border-primary/30'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {paperMode === 'a4' && (
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs font-medium text-muted-foreground mb-2">Standard A4 layouts</label>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {(['40', '48', '30', '24', '4'] as const).map((preset) => (
+                      <button key={preset} type="button" onClick={() => setLayoutPreset(preset)} className={`py-2 rounded-lg text-[11px] font-medium border transition-all ${layoutPreset === preset ? 'bg-primary text-primary-foreground border-primary' : 'border-border text-muted-foreground hover:border-primary/30'}`} >
+                        {A4_LAYOUT_PRESETS[preset].description}
+                      </button>
+                    ))}
+                    <button type="button" onClick={() => setLayoutPreset('custom')} className={`py-2 rounded-lg text-[11px] font-medium border transition-all ${layoutPreset === 'custom' ? 'bg-primary text-primary-foreground border-primary' : 'border-border text-muted-foreground hover:border-primary/30'}`}>
+                      Custom
+                    </button>
+                  </div>
+                </div>
+
+                {layoutPreset === 'custom' && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-muted-foreground mb-1">Columns</label>
+                      <input type="number" min={1} max={12} value={customColumns} onChange={(event) => setCustomColumns(Math.min(12, Math.max(1, Number(event.target.value) || 1)))} className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-muted-foreground mb-1">Rows</label>
+                      <input type="number" min={1} max={12} value={customRows} onChange={(event) => setCustomRows(Math.min(12, Math.max(1, Number(event.target.value) || 1)))} className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                    </div>
+                  </div>
+                )}
+                {layoutPreset === '40' && <p className="text-[11px] text-muted-foreground">A4 portrait · 4 columns × 10 rows · each label 52.5 × 29.7 mm · no gaps</p>}
+              </div>
+            )}
+
+            {paperMode === 'thermal' && (
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-muted-foreground mb-1">Width (mm)</label>
+                  <input type="number" min={20} max={120} value={thermalWidthMm} onChange={(event) => setThermalWidthMm(Math.max(20, Number(event.target.value) || 48))} className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted-foreground mb-1">Height (mm)</label>
+                  <input type="number" min={10} max={80} value={thermalHeightMm} onChange={(event) => setThermalHeightMm(Math.max(10, Number(event.target.value) || 28))} className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted-foreground mb-1">Gap (mm)</label>
+                  <input type="number" min={0} max={10} value={thermalGapMm} onChange={(event) => setThermalGapMm(Math.max(0, Number(event.target.value) || 2))} className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                </div>
+              </div>
+            )}
+            {paperMode === 'a4' && (
+              <div className="space-y-3 rounded-lg border border-border p-3">
+                <p className="text-xs font-semibold">Print calibration</p>
+                <p className="text-[11px] text-muted-foreground">Print at 100% / Actual size. Use small offsets to compensate for printer feed alignment.</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="text-xs">Horizontal offset (mm)<input type="number" min={-5} max={5} step={0.1} value={calibrationXmm} onChange={(event) => setCalibrationXmm(Math.max(-5, Math.min(5, Number(event.target.value) || 0)))} className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" /></label>
+                  <label className="text-xs">Vertical offset (mm)<input type="number" min={-5} max={5} step={0.1} value={calibrationYmm} onChange={(event) => setCalibrationYmm(Math.max(-5, Math.min(5, Number(event.target.value) || 0)))} className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" /></label>
+                </div>
+                <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={printBoundaries} onChange={(event) => setPrintBoundaries(event.target.checked)} /> Print label boundary lines</label>
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+              <span>Current print batch</span>
+              <span>{printItems.length} labels</span>
+            </div>
+            <div className="rounded-xl border border-border bg-background p-3">
+              <div className="mb-3 flex items-center justify-between text-[11px] font-medium text-foreground">
+                <span>{paperMode === 'a4' ? layoutConfig.description : 'Thermal roll'}</span>
+                <span>{paperMode === 'a4' ? `${layoutConfig.columns}×${layoutConfig.rows}` : `${thermalWidthMm}×${thermalHeightMm}mm`}</span>
+              </div>
+              <div className={`grid ${paperMode === 'a4' ? 'grid-cols-2 md:grid-cols-3' : 'grid-cols-1'} gap-2`}>
+                {printItems.slice(0, 6).map((item, index) => (
+                  <div key={`${item.code}-${index}`} className="rounded-lg border border-border bg-white p-2 text-left">
+                    <div className="text-[10px] font-semibold text-foreground truncate">{item.name}</div>
+                    <div className="mt-1">
+                      <BarcodeGraphic value={item.code} format={item.format} />
+                    </div>
+                    <div className="mt-1 text-[10px] text-muted-foreground font-[DM_Mono]">{item.code}</div>{item.sku && <div className="mt-0.5 text-[9px] text-slate-500">SKU: {item.sku}</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {showPrintPreview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-3 sm:p-6" role="dialog" aria-modal="true" aria-label="Barcode print preview">
+          <div className="flex max-h-full w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-2xl">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border p-4">
+              <div>
+                <h2 className="font-semibold text-foreground">Print preview</h2>
+                <p className="text-xs text-muted-foreground">{paperMode === 'a4' ? `${layoutConfig.description} · Sheet ${previewSheet + 1} of ${totalPrintSheets}` : `Thermal roll · Label ${previewSheet + 1} of ${totalPrintSheets} · ${thermalWidthMm} × ${thermalHeightMm} mm`}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button type="button" disabled={previewSheet === 0} onClick={() => setPreviewSheet(index => Math.max(0, index - 1))} className="rounded-lg border px-3 py-2 text-xs disabled:opacity-40">Previous</button>
+                <button type="button" disabled={previewSheet >= totalPrintSheets - 1} onClick={() => setPreviewSheet(index => Math.min(totalPrintSheets - 1, index + 1))} className="rounded-lg border px-3 py-2 text-xs disabled:opacity-40">Next</button>
+                <button type="button" onClick={() => setShowPrintPreview(false)} aria-label="Close print preview" className="rounded-lg border px-3 py-2 text-xs">Close</button>
+                <button type="button" onClick={handlePrint} className="inline-flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground"><Printer className="h-3.5 w-3.5"/>Print</button>
+              </div>
+            </div>
+            <div className="overflow-auto bg-slate-100 p-4 sm:p-6">
+              {paperMode === 'a4' ? (
+                <div className="relative mx-auto w-full max-w-[720px] overflow-hidden bg-white text-black shadow-lg" style={{ aspectRatio: `${A4_40_LABEL_DIMENSIONS.paperWidthMm} / ${A4_40_LABEL_DIMENSIONS.paperHeightMm}` }}>
+                  <div className="absolute inset-0 grid" style={{ gridTemplateColumns: `repeat(${layoutConfig.columns}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${layoutConfig.rows}, minmax(0, 1fr))`, padding: layoutPreset === '40' ? '0' : '3.8%', gap: layoutPreset === '40' ? '0' : '1.2%', transform: `translate(${calibrationXmm}mm, ${calibrationYmm}mm)` }}>
+                  {Array.from({ length: layoutConfig.labelCount }, (_, index) => {
+                    const item = previewItems[index];
+                    return <div key={`${item?.code || 'blank'}-${index}`} className="flex min-h-0 flex-col items-center justify-center overflow-hidden border border-dashed border-slate-300 px-1 py-1 text-center">
+                      {item ? <><span className="w-full truncate text-[clamp(5px,1.1vw,10px)] font-semibold">{item.name}</span><div className="w-full overflow-hidden"><BarcodeGraphic value={item.code} format={item.format}/></div><span className="max-w-full truncate font-mono text-[clamp(5px,0.9vw,9px)]">{item.code}</span>{item.sku&&<span className="max-w-full truncate text-[clamp(5px,0.8vw,8px)]">SKU: {item.sku}</span>}{Number(item.price)>0&&<span className="text-[clamp(5px,0.9vw,9px)]">₹{item.price}</span>}</> : <span className="text-[8px] text-slate-300">Blank label</span>}
+                    </div>;
+                  })}
+                  </div>
+                </div>
+              ) : (
+                <div className="mx-auto flex flex-col items-center justify-center overflow-hidden bg-white p-3 text-black shadow-lg" style={{ width: `min(100%, ${thermalWidthMm * 3.2}px)`, minHeight: `${thermalHeightMm * 3.2}px` }}>
+                  {previewItems[0]&&<><span className="max-w-full truncate text-xs font-semibold">{previewItems[0].name}</span><div className="w-full overflow-hidden"><BarcodeGraphic value={previewItems[0].code} format={previewItems[0].format}/></div><span className="font-mono text-xs">{previewItems[0].code}</span>{previewItems[0].sku&&<span className="text-[10px]">SKU: {previewItems[0].sku}</span>}{Number(previewItems[0].price)>0&&<span className="text-xs">₹{previewItems[0].price}</span>}</>}
+                </div>
+              )}
+              <p className="mt-3 text-center text-xs text-slate-600">{printItems.length} labels · {totalPrintSheets} {paperMode === 'a4' ? 'sheets' : 'roll labels'} total</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showQuickAdd && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
+          <div className="w-full max-w-xl rounded-2xl border border-border bg-card p-5 shadow-2xl">
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <h3 className="font-semibold text-foreground">Add product to inventory</h3>
+              <button type="button" onClick={() => setShowQuickAdd(false)} className="rounded-lg border border-border p-2 text-muted-foreground hover:border-primary/30 hover:text-foreground">
+                <X className="w-3.5 h-3.5" />
               </button>
-            ))}
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">Product name</label>
+                <input value={quickAddForm.name} onChange={(event) => setQuickAddForm((previous) => ({ ...previous, name: event.target.value }))} className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">SKU</label>
+                <input value={quickAddForm.sku} onChange={(event) => setQuickAddForm((previous) => ({ ...previous, sku: event.target.value }))} className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">Barcode</label>
+                <input value={quickAddForm.barcode} onChange={(event) => setQuickAddForm((previous) => ({ ...previous, barcode: sanitizeBarcodeValue(event.target.value) }))} className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm font-[DM_Mono] focus:outline-none focus:ring-2 focus:ring-primary/30" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">Unit</label>
+                <input value={quickAddForm.unit} onChange={(event) => setQuickAddForm((previous) => ({ ...previous, unit: event.target.value }))} className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">Selling price</label>
+                <input type="number" min="0" step="0.01" value={quickAddForm.price} onChange={(event) => setQuickAddForm((previous) => ({ ...previous, price: event.target.value }))} className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">Cost price</label>
+                <input type="number" min="0" step="0.01" value={quickAddForm.costPrice} onChange={(event) => setQuickAddForm((previous) => ({ ...previous, costPrice: event.target.value }))} className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">Opening stock</label>
+                <input type="number" min="0" value={quickAddForm.stock} onChange={(event) => setQuickAddForm((previous) => ({ ...previous, stock: event.target.value }))} className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">Category</label>
+                <input value={quickAddForm.category} onChange={(event) => setQuickAddForm((previous) => ({ ...previous, category: event.target.value }))} className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+              </div>
+            </div>
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button type="button" onClick={() => setShowQuickAdd(false)} className="rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground hover:border-primary/30">Cancel</button>
+              <button type="button" onClick={handleQuickAdd} className="rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90">Save product</button>
+            </div>
           </div>
         </div>
       )}
@@ -4510,7 +5241,7 @@ function BarcodeView({ products }: { products: Product[] }) {
   );
 }
 
-// ─── GST / ITR ────────────────────────────────────────────────────────────────
+// ─── Navigation Config ────────────────────────────────────────────────────────
 function GSTView({ profile }: { profile: Profile }) {
   const gstLinks = [
     { label: "File GSTR-1 (Outward Supplies)", desc: "Monthly/quarterly return for outward supplies", url: "https://www.gst.gov.in/", badge: "Monthly" },
@@ -5739,18 +6470,22 @@ function ClosedPPIView({ cards, setCards, profile }: {
 }
 
 // ─── Navigation Config ────────────────────────────────────────────────────────
+
 const NAV: { id: Tab; label: string; icon: React.ElementType }[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "cashsale", label: "Cash Sale", icon: IndianRupee },
   { id: "invoice", label: "Generate Invoice", icon: FileText },
   { id: "invoices", label: "View Invoices", icon: FileText },
   { id: "inventory", label: "Products", icon: Package },
+  { id: "barcode", label: "Barcode Generator", icon: QrCode },
   { id: "local_dashboard", label: "Local Marketplace", icon: Store },
   { id: "local_orders", label: "Fulfillment", icon: ShoppingCart },
   { id: "local_products", label: "Market Listings", icon: Boxes },
   { id: "demand", label: "Purchases", icon: ShoppingBag },
   { id: "customers", label: "Customers", icon: Users },
+  { id: "regular_demands", label: "Regular Demands", icon: ClipboardList },
   { id: "reports", label: "Reports", icon: TrendingUp },
+  { id: "whatsapp_reports", label: "WhatsApp Reports", icon: MessageCircle },
   { id: "reminders", label: "Reminders", icon: Bell },
   { id: "rates", label: "Party Rates", icon: Tag },
   { id: "bulk", label: "Bulk Update", icon: Download },
@@ -5764,7 +6499,7 @@ const NAV: { id: Tab; label: string; icon: React.ElementType }[] = [
 ];
 
 const TITLES: Record<Tab, string> = {
-  dashboard: "Dashboard", demand: "Purchases", inventory: "Products",
+  dashboard: "Dashboard", demand: "Purchases", regular_demands: "Regular Demands", whatsapp_reports: "WhatsApp Reports", inventory: "Products",
   local_dashboard: "NearBasket - Marketplace Management",
   local_orders: "Order Fulfillment",
   local_products: "NearBasket - Marketplace Published Products",
@@ -5783,12 +6518,16 @@ function BillingApp({
   initialTab = "dashboard",
   onTabChange,
   onSwitchToConsumer,
+  marketplaceOrdersError = null,
+  marketplaceOrdersLoading = false,
 }: {
   firebaseUser?: AuthSessionUser;
   onFirebaseLogout?: () => Promise<void>;
   initialTab?: Tab;
   onTabChange?: (tab: Tab) => void;
   onSwitchToConsumer?: () => void;
+  marketplaceOrdersError?: string | null;
+  marketplaceOrdersLoading?: boolean;
 } = {}) {
   const { assertCloudSyncAvailable } = useConnectivity();
   const [accounts, setAccounts] = useLocalStorage<BusinessAccount[]>(ACCOUNT_INDEX_KEY, []);
@@ -5803,6 +6542,8 @@ function BillingApp({
   const [products, setProducts] = useLocalStorage<Product[]>(scoped("products"), []);
   const [customers, setCustomers] = useLocalStorage<Customer[]>(scoped("customers"), []);
   const [demands, setDemands] = useLocalStorage<DemandOrder[]>(scoped("demands"), []);
+  const [regularDemands, setRegularDemands] = useLocalStorage<RegularDemandRecord[]>(scoped("regular_demands"), []);
+  const [whatsAppSettings, setWhatsAppSettings] = useLocalStorage<WhatsAppSettings>(scoped("whatsapp_settings"), { countryCode: "+91", phone: "", deliveryTime: "20:00", dailyEnabled: false, cashSales: true, regularDemands: true, frequency: "daily" });
   const [invoices, setInvoices] = useLocalStorage<InvoiceRecord[]>(scoped("invoices"), [], false);
   const [cashSaleReturns, setCashSaleReturns] = useLocalStorage<CashSaleReturnRecord[]>(scoped("cash_sale_returns"), []);
   const cashSaleReturnsRef = useRef(cashSaleReturns);
@@ -5985,6 +6726,7 @@ function BillingApp({
     (!sessionUser?.email || getBusinessAccountEmail(activeAccount) === normalizeEmail(sessionUser.email))
   );
   const [tab, setTab] = useState<Tab>(initialTab);
+  const [focusedMarketplaceOrderId,setFocusedMarketplaceOrderId]=useState<string|null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [pendingQuickAction, setPendingQuickAction] = useState<"product" | "customer" | null>(null);
   const [editingInvoiceId, setEditingInvoiceId] = useState<string | null>(null);
@@ -6293,13 +7035,13 @@ function BillingApp({
     });
   };
 
-  const localShopId = profile.businessId || "shop_" + (activeBusinessId || "main");
-  const localShop: LocalShop = dbStore.getShops().find(
-    (shop) => normalizeEmail(shop.email) === normalizeEmail(profile.email)
-  ) || dbStore.getShopById(localShopId) || {
+  const localShopId = firebaseUser?.shopId || profile.businessId || "shop_" + (activeBusinessId || "main");
+  const localShop: LocalShop = (firebaseUser?.shopId
+    ? dbStore.getShopById(firebaseUser.shopId)
+    : dbStore.getShops().find((shop) => normalizeEmail(shop.email) === normalizeEmail(profile.email))) || dbStore.getShopById(localShopId) || {
     id: localShopId,
     name: profile.shopName || "My Store",
-    ownerId: "owner_1",
+    ownerId: firebaseUser?.id || "owner_1",
     ownerName: profile.ownerName || "Merchant",
     phone: profile.phone || "9999999999",
     email: profile.email || "shop@billpilot.app",
@@ -6340,7 +7082,7 @@ function BillingApp({
 
   const renderView = () => {
     switch (tab) {
-      case "dashboard":  return <DashboardView products={products} customers={customers} demands={demands} invoices={invoices} nextInvoiceLabel={nextInvoiceLabel} reminders={reminders} onNavigate={handleDashboardQuickAction} marketplaceOrders={shopOrders} />;
+      case "dashboard":  return <DashboardView products={products} customers={customers} demands={demands} invoices={invoices} nextInvoiceLabel={nextInvoiceLabel} reminders={reminders} onNavigate={handleDashboardQuickAction} onOpenMarketplaceOrder={(orderId)=>{setFocusedMarketplaceOrderId(orderId);handleNav('local_orders');}} marketplaceOrders={shopOrders} marketplaceShopId={localShop.id} marketplaceOrdersLoading={marketplaceOrdersLoading} marketplaceOrdersError={marketplaceOrdersError} />;
       case "demand":     return <DemandView demands={demands} setDemands={setDemands} customers={customers} />;
       case "inventory":  return <InventoryView products={products} setProducts={setProducts} businessCategory={profile.category} storageKey={scoped("products")} openAddForm={pendingQuickAction === "product"} onQuickActionHandled={clearPendingQuickAction} />;
       case "local_dashboard":
@@ -6351,6 +7093,7 @@ function BillingApp({
             orders={shopOrders}
             onRefreshOrders={() => setMarketplaceStoreVersion((version) => version + 1)}
             viewMode={tab === "local_orders" ? "orders" : "dashboard"}
+            focusOrderId={focusedMarketplaceOrderId}
           />
         );
       case "local_products":
@@ -6359,7 +7102,9 @@ function BillingApp({
       case "invoices":   return <InvoicesView invoices={combinedInvoices} onDelete={(id) => void deleteInvoice(id)} onNavigateInvoice={() => { setEditingInvoiceId(null); handleNav("invoice"); }} onEditInvoice={(id) => { setEditingInvoiceId(id); handleNav("invoice"); }} profile={profile} marketplaceRecordsError={marketplaceInvoicesError} />;
       case "cashsale":   return <CashSaleView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} onProcessReturn={processCashSaleReturn} invoices={invoices} returns={cashSaleReturns} devices={paymentDevices} gstRegistration={gstRegistration} gstRegistrationLoading={gstRegistrationLoading} shopId={firebaseUser?.shopId} shopOwnerUid={firebaseUser?.id} />;
       case "posdevices": return <PaymentDevicesView devices={paymentDevices} setDevices={setPaymentDevices} invoices={invoices} />;
-      case "barcode":    return <BarcodeView products={products} />;
+      case "barcode":    return <BarcodeView products={products} setProducts={setProducts} />;
+      case "regular_demands": return <RegularDemandsView demands={regularDemands} setDemands={setRegularDemands} products={products} setProducts={setProducts} actor={sessionUser?.username || sessionUser?.email || "Shopkeeper"} />;
+      case "whatsapp_reports": return <WhatsAppReportsView settings={whatsAppSettings} setSettings={setWhatsAppSettings} invoices={invoices} demands={regularDemands} returns={cashSaleReturns} shopName={profile.shopName || "Dukan Yantra"} />;
       case "ppi":        return <ClosedPPIView cards={ppiCards} setCards={setPpiCards} profile={profile} />;
       case "gst":        return <GSTView profile={profile} />;
       case "customers":  return <CustomersView customers={customers} setCustomers={setCustomers} profile={profile} marketplaceCustomers={marketplaceCustomers} shopId={localShop.id} marketplaceRecordsError={marketplaceCustomersError} openAddForm={pendingQuickAction === "customer"} onQuickActionHandled={clearPendingQuickAction} />;
@@ -6394,8 +7139,8 @@ function BillingApp({
         <nav className="flex-1 py-3 space-y-0.5 overflow-y-auto px-2">
           {NAV.map(({ id, label, icon: Icon }) => (
             <button key={id} onClick={() => handleNav(id)}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all text-left ${tab === id ? "bg-white/10 text-white" : "text-blue-200/70 hover:bg-white/5 hover:text-white"}`}>
-              <Icon className={`w-4 h-4 shrink-0 ${tab === id ? "text-accent" : ""}`} />
+              className={`w-full flex items-center gap-3 border px-3 py-2.5 rounded-lg text-sm font-medium transition-all text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80 ${tab === id ? "border-white/20 bg-white/15 text-white" : "border-transparent text-blue-100 hover:bg-white/10 hover:text-white"}`}>
+              <Icon className={`w-4 h-4 shrink-0 ${tab === id ? "text-blue-200" : ""}`} />
               <span className="flex-1">{label}</span>
               {id === "posdevices" && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-red-500/90 text-white uppercase tracking-wide shrink-0">Dummy</span>}
               {tab === id && <ChevronRight className="w-3.5 h-3.5 text-accent shrink-0" />}

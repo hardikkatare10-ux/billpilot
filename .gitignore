@@ -16,6 +16,7 @@ dist-ssr/
 build/
 out/
 release/
+public/downloads/Dukan Yantra Setup.exe
 *.tsbuildinfo
 
 # ───── Environment & secrets (never commit these) ─────

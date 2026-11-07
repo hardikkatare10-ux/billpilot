@@ -5,7 +5,7 @@
  * and delivery OTP verification at doorstep handover.
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   CheckCircle2,
   XCircle,
@@ -19,21 +19,25 @@ import {
   DollarSign,
   TrendingUp,
   Save,
+  Trash2,
 } from 'lucide-react';
 import { Order, Shop } from '../../types';
 import { formatINR } from '../../utils/formatters';
-import { transitionFirestoreOrderStatus } from '../../services/firebase/orderService';
+import { archiveClosedOrderForShop, transitionFirestoreOrderStatus } from '../../services/firebase/orderService';
 import { updateFirestoreShopLocation } from '../../services/firebase/shopService';
 import { MapLocationPicker, PickedLocation } from '../common/MapLocationPicker';
 import { googleMapsUrl } from '../../utils/geo';
 import { dbStore } from '../../services/db/store';
 import { InvoiceModal } from '../common/InvoiceModal';
+import { canArchiveShopOrder } from '../../utils/orderArchival';
+import { auth } from '../../services/firebase/config';
 
 interface ShopDashboardProps {
   shop: Shop;
   orders: Order[];
   onRefreshOrders: () => void;
   viewMode?: 'dashboard' | 'orders';
+  focusOrderId?: string | null;
 }
 
 export const ShopDashboard: React.FC<ShopDashboardProps> = ({
@@ -41,6 +45,7 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
   orders,
   onRefreshOrders,
   viewMode = 'dashboard',
+  focusOrderId = null,
 }) => {
   const [shopLocation, setShopLocation] = useState<PickedLocation | null>(
     shop.address.coordinates
@@ -59,7 +64,23 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
   const [enteredOtp, setEnteredOtp] = useState('');
   const [otpError, setOtpError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
+  const [archiveOrderId, setArchiveOrderId] = useState<string | null>(null);
+  const [showArchivedOrders, setShowArchivedOrders] = useState(false);
   const [isUpdatingOrder, setIsUpdatingOrder] = useState(false);
+  const actorId = auth.currentUser?.uid || shop.ownerId;
+  const archiveInProgressRef = useRef(false);
+  const isClosedForFulfillment = (order: Order) => ['cancelled','rejected'].includes(order.status);
+  const currentOrders = orders.filter((order) => !order.shopArchived && !isClosedForFulfillment(order));
+  const closedOrArchivedOrders = orders.filter((order) => order.shopArchived || isClosedForFulfillment(order));
+  const visibleOrders = showArchivedOrders ? closedOrArchivedOrders : currentOrders;
+
+  useEffect(() => {
+    if (!focusOrderId) return;
+    setShowArchivedOrders(orders.find((order) => order.id === focusOrderId)?.shopArchived === true);
+    const frame = window.requestAnimationFrame(() => document.getElementById(`fulfillment-order-${focusOrderId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusOrderId, orders]);
 
   const handleSaveShopLocation = async () => {
     if (!shopLocation) {
@@ -87,13 +108,16 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
   };
 
   // Shop Orders metrics
-  const activeOrders = orders.filter(
+  const activeOrders = currentOrders.filter(
     (o) => !['delivered', 'cancelled', 'rejected', 'resolved'].includes(o.status)
   );
-  const deliveredOrders = orders.filter((o) => o.status === 'delivered');
+  const deliveredOrders = currentOrders.filter((o) => o.status === 'delivered');
   const totalSalesPaise = deliveredOrders
     .filter((order) => order.paymentStatus === 'completed')
     .reduce((acc, order) => acc + order.totalAmount, 0);
+  const canCancelFromFulfillment = (order: Order) => !order.shopArchived &&
+    order.paymentStatus !== 'completed' &&
+    ['pending_confirmation','accepted','preparing','ready_for_dispatch','out_for_delivery','cancellation_requested'].includes(order.status);
 
   const handleAcceptOrder = async (orderId: string) => {
     setIsUpdatingOrder(true);
@@ -101,7 +125,7 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
       await transitionFirestoreOrderStatus(
         orderId,
         'accepted',
-        shop.ownerId,
+        actorId,
         'shopkeeper',
         { note: 'Order accepted by shop staff.' }
       );
@@ -121,7 +145,7 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
       await transitionFirestoreOrderStatus(
         orderId,
         'accepted',
-        shop.ownerId,
+        actorId,
         'shopkeeper',
         { note: 'Retrying idempotent marketplace invoice creation.' }
       );
@@ -142,7 +166,7 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
       await transitionFirestoreOrderStatus(
         rejectOrderId,
         'rejected',
-        shop.ownerId,
+        actorId,
         'shopkeeper',
         { reason: rejectReason, note: 'Order rejected with reason.' }
       );
@@ -162,7 +186,7 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
       await transitionFirestoreOrderStatus(
         orderId,
         nextStatus,
-        shop.ownerId,
+        actorId,
         'shopkeeper',
         { note: `Progressed to ${nextStatus}` }
       );
@@ -175,6 +199,36 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
     }
   };
 
+  const handleRemoveOrder = async () => {
+    if (!archiveOrderId || archiveInProgressRef.current) return;
+    const order = orders.find((item) => item.id === archiveOrderId);
+    if (!order) return;
+    archiveInProgressRef.current = true;
+    setIsUpdatingOrder(true);
+    setActionError(null);
+    setActionSuccess(null);
+    try {
+      if (canArchiveShopOrder(order)) {
+        await archiveClosedOrderForShop(archiveOrderId, shop.id, actorId);
+        setActionSuccess('Order removed from the local marketplace and sales totals. Its order and payment history remains in archived orders.');
+      } else if (canCancelFromFulfillment(order)) {
+        await transitionFirestoreOrderStatus(archiveOrderId, 'cancelled', actorId, 'shopkeeper', {
+          reason: 'Removed by authorized shopkeeper from marketplace fulfillment.',
+          note: 'Cancelled through the fulfillment delete action; order and payment history retained.',
+        });
+        setActionSuccess('Order cancelled and removed from active fulfillment. Its order and payment history are preserved.');
+      } else {
+        throw new Error('Delivered and paid marketplace records cannot be deleted from fulfillment.');
+      }
+      setArchiveOrderId(null);
+      onRefreshOrders();
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : 'Could not remove this order from active fulfillment.');
+    } finally {
+      archiveInProgressRef.current = false;
+      setIsUpdatingOrder(false);
+    }
+  };
   const handleVerifyOtp = (e: React.FormEvent) => {
     e.preventDefault();
     if (!otpVerifyOrderId || !enteredOtp) return;
@@ -183,7 +237,7 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
     transitionFirestoreOrderStatus(
       otpVerifyOrderId,
       'delivered',
-      shop.ownerId,
+      actorId,
       'shopkeeper',
       { otp: enteredOtp, note: 'Delivered with verified customer OTP.' }
     ).then(() => {
@@ -311,7 +365,7 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
             <div>
               <span className="text-xs text-slate-500 block">Marketplace Orders</span>
               <span className="text-xl font-extrabold text-slate-900 font-tabular">
-                {orders.length}
+                {currentOrders.length}
               </span>
             </div>
           </div>
@@ -332,26 +386,30 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
 
       {/* Live Orders Queue */}
       <div className="space-y-4">
+        {actionError && <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">{actionError}</p>}
+        {actionSuccess && <p role="status" className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">{actionSuccess}</p>}
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
             <Package className="w-4 h-4 text-blue-600" />
-            {viewMode === 'orders' ? 'Fulfillment Queue' : `Live Customer Orders (${orders.length})`}
+            {viewMode === 'orders' ? 'Fulfillment Queue' : `Live Customer Orders (${visibleOrders.length})`}
           </h2>
-          <span className="text-xs text-slate-500">Auto-refreshing storage</span>
+          <button type="button" onClick={() => setShowArchivedOrders((value) => !value)} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+            {showArchivedOrders ? `View active orders (${currentOrders.length})` : `View archived orders (${orders.length-currentOrders.length})`}
+          </button>
         </div>
 
-        {orders.length === 0 ? (
+        {visibleOrders.length === 0 ? (
           <div className="bg-white rounded-xl border border-slate-200 p-12 text-center text-slate-500 text-xs">
-            No orders received yet today.
+            {showArchivedOrders ? 'No archived orders.' : 'No active orders received yet.'}
           </div>
         ) : (
           <div className="space-y-4">
-            {orders.map((order) => {
-              const isPending = order.status === 'pending_confirmation';
-              const isAccepted = order.status === 'accepted';
-              const isPreparing = order.status === 'preparing';
-              const isReady = order.status === 'ready_for_dispatch';
-              const isDispatched = order.status === 'out_for_delivery';
+            {visibleOrders.map((order) => {
+              const isPending = !order.shopArchived && order.status === 'pending_confirmation';
+              const isAccepted = !order.shopArchived && order.status === 'accepted';
+              const isPreparing = !order.shopArchived && order.status === 'preparing';
+              const isReady = !order.shopArchived && order.status === 'ready_for_dispatch';
+              const isDispatched = !order.shopArchived && order.status === 'out_for_delivery';
               const isDelivered = order.status === 'delivered';
               const isClosed = ['delivered', 'cancelled', 'rejected', 'refunded'].includes(
                 order.status
@@ -360,7 +418,8 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
               return (
                 <div
                   key={order.id}
-                  className={`bg-white rounded-xl border p-5 shadow-xs transition-all space-y-4 ${
+                  id={`fulfillment-order-${order.id}`}
+                  className={`bg-white rounded-xl border p-5 shadow-xs transition-all space-y-4 ${focusOrderId===order.id?'ring-2 ring-blue-500 ':''}${
                     isPending
                       ? 'border-blue-400 ring-2 ring-blue-100 bg-blue-50/20'
                       : 'border-slate-200'
@@ -400,6 +459,16 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
                           <FileText className="w-4 h-4 text-blue-600" />
                         </button>
                       )}
+                      <button
+                        type="button"
+                        onClick={() => setArchiveOrderId(order.id)}
+                        disabled={isUpdatingOrder || (!canArchiveShopOrder(order) && !canCancelFromFulfillment(order))}
+                        title={order.shopArchived ? 'Already archived' : 'Remove from active marketplace views'}
+                        aria-label={`Delete order ${order.orderNumber}`}
+                        className="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-2.5 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />Delete
+                      </button>
                     </div>
                   </div>
 
@@ -561,6 +630,36 @@ export const ShopDashboard: React.FC<ShopDashboardProps> = ({
           </div>
         )}
       </div>
+
+      {archiveOrderId && (() => {
+        const order = visibleOrders.find((item) => item.id === archiveOrderId);
+        if (!order) return null;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4">
+            <div role="dialog" aria-modal="true" aria-labelledby="archive-order-title" className="w-full max-w-md space-y-4 rounded-2xl border border-slate-200 bg-white p-6 text-xs shadow-2xl">
+              <div className="flex items-center gap-2 text-rose-700">
+                <Trash2 className="h-5 w-5" />
+                <h3 id="archive-order-title" className="text-sm font-bold text-slate-900">Remove order #{order.orderNumber} from the local marketplace?</h3>
+              </div>
+              <p className="text-slate-600">
+                <strong>Order ID:</strong> {order.id}<br />
+                <strong>Customer:</strong> {order.customerName}<br />
+                <strong>Amount:</strong> {formatINR(order.totalAmount)}<br />
+                <strong>Status:</strong> {order.status.replace(/_/g, ' ')}<br />
+                {canArchiveShopOrder(order)
+                  ? 'This order will disappear from the local marketplace, delivered orders, and paid sales totals. Its order and payment history remains available in archived orders.'
+                  : 'This unpaid in-progress order will be cancelled and its stock restored. The order and payment history will remain available.'}
+              </p>
+              <div className="flex justify-end gap-2">
+                <button type="button" onClick={() => setArchiveOrderId(null)} disabled={isUpdatingOrder} className="rounded-lg px-4 py-2 text-slate-600 hover:bg-slate-100 disabled:opacity-50">Cancel</button>
+                <button type="button" onClick={() => void handleRemoveOrder()} disabled={isUpdatingOrder} className="rounded-lg bg-rose-600 px-4 py-2 font-semibold text-white hover:bg-rose-700 disabled:opacity-50">
+                  {isUpdatingOrder ? 'Processing…' : 'Confirm Delete'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Reject Order Modal */}
       {rejectOrderId && (

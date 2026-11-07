@@ -100,6 +100,16 @@ service cloud.firestore {
       );
     }
 
+    // Keep marketplace writes consistent with the shopkeeper link accepted by
+    // isShopOwner(). Approved shopkeeper accounts may operate their linked,
+    // verified shop even when its original ownerId belongs to another account.
+    function isVerifiedShopOperator(shopId) {
+      let shopPath = /databases/$(database)/documents/shops/$(shopId);
+      return isShopOwner(shopId)
+        && exists(shopPath)
+        && get(shopPath).data.verificationStatus == 'verified';
+    }
+
     // Healthcheck / Connection test endpoint
     match /test/{docId} {
       allow read: if true;
@@ -551,6 +561,37 @@ service cloud.firestore {
 
     // 4. Products & Inventory (Single Canonical Inventory)
     match /products/{productId} {
+      function validOrderStockRestore() {
+        let orderId = incoming().stockRestoreOrderId;
+        let orderPath = /databases/$(database)/documents/orders/$(orderId);
+        let previousOrder = get(orderPath).data;
+        let restoredOrder = getAfter(orderPath).data;
+        return orderId is string
+          && exists(orderPath)
+          && existsAfter(orderPath)
+          && isVerifiedShopOperator(existing().shopId)
+          && previousOrder.shopId == existing().shopId
+          && previousOrder.status in [
+            'pending_confirmation', 'accepted', 'preparing',
+            'ready_for_dispatch', 'out_for_delivery', 'cancellation_requested'
+          ]
+          && restoredOrder.status in ['cancelled', 'rejected']
+          && restoredOrder.shopId == existing().shopId
+          && restoredOrder.paymentStatus != 'completed'
+          && restoredOrder.stockRestoration is map
+          && restoredOrder.stockRestoration[productId] is map
+          && restoredOrder.stockRestoration[productId].quantity is number
+          && restoredOrder.stockRestoration[productId].item is map
+          && restoredOrder.items.hasAny([
+            restoredOrder.stockRestoration[productId].item
+          ])
+          && restoredOrder.stockRestoration[productId].item.productId == productId
+          && restoredOrder.stockRestoration[productId].item.quantity
+            == restoredOrder.stockRestoration[productId].quantity
+          && incoming().stockQuantity - existing().stockQuantity
+            == restoredOrder.stockRestoration[productId].quantity;
+      }
+
       // Consumers and marketplace visitors can freely browse catalog
       allow read: if true;
 
@@ -573,6 +614,15 @@ service cloud.firestore {
             && incoming().stockQuantity is number
             && incoming().stockQuantity >= 0
             && incoming().stockQuantity <= existing().stockQuantity)
+        || (
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'stockQuantity', 'isAvailable', 'updatedAt', 'stockRestoreOrderId'
+          ])
+          && incoming().stockQuantity is number
+          && incoming().stockQuantity > existing().stockQuantity
+          && incoming().isAvailable == (incoming().stockQuantity > 0)
+          && validOrderStockRestore()
+        )
         || isAdmin()
       );
 
@@ -617,15 +667,32 @@ service cloud.firestore {
       allow update: if isSignedIn() && (
         (existing().customerId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'statusHistory', 'updatedAt', 'cancellationReason']))
         || (
-          (isShopOwner(existing().shopId)
-            && ownsVerifiedShop(existing().shopId))
+          isVerifiedShopOperator(existing().shopId)
           && incoming().diff(existing()).affectedKeys().hasOnly([
-            'status', 'statusHistory', 'updatedAt', 'invoice', 'invoiceIssue', 'delivery', 'paymentStatus'
+            'status', 'statusHistory', 'updatedAt', 'invoice', 'invoiceIssue', 'delivery', 'paymentStatus', 'stockRestoration'
           ])
+          && (!incoming().diff(existing()).affectedKeys().hasAny(['stockRestoration'])
+            || (incoming().status in ['cancelled', 'rejected'] && incoming().stockRestoration is map))
           && (
             !incoming().diff(existing()).affectedKeys().hasAny(['invoice'])
             || invoiceReferenceIsBackedByShopInvoice()
           )
+        )
+        || (
+          isVerifiedShopOperator(existing().shopId)
+          && (
+            existing().status in ['rejected', 'cancelled', 'delivered']
+            || existing().get('paymentStatus', 'pending') == 'completed'
+            || (existing().status == 'pending_confirmation'
+              && existing().get('paymentStatus', 'pending') in ['pending', 'failed'])
+          )
+          && (!('shopArchived' in existing()) || existing().shopArchived != true)
+          && incoming().shopArchived == true
+          && incoming().shopArchivedBy == request.auth.uid
+          && incoming().shopArchivedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'shopArchived', 'shopArchivedAt', 'shopArchivedBy'
+          ])
         )
         || isAdmin()
       );

@@ -19,6 +19,7 @@ import {
   orderBy,
   query,
   runTransaction,
+  serverTimestamp,
   startAfter,
   where,
   type DocumentData,
@@ -37,6 +38,8 @@ import {
 import { calculateHaversineDistanceKm } from '../../utils/geo';
 import { adjustMarketplaceCompletedPurchaseAmount } from '../../utils/marketplaceCustomers';
 import { assertFirebaseReachable } from '../../../lib/firebaseConnectivity';
+import { canArchiveShopOrder } from '../../utils/orderArchival';
+import { normalizeFirestoreDate, normalizeOrderStatus, normalizePaymentStatus } from '../../utils/orderNormalization';
 
 export interface PlaceOrderInput {
   customerId: string;
@@ -104,7 +107,7 @@ function orderFromFirestore(id: string, data: Record<string, unknown>): Order {
       imageUrl: String(item.imageUrl ?? ''),
     };
   });
-  const createdAt = String(data.createdAt ?? new Date().toISOString());
+  const createdAt = normalizeFirestoreDate(data.createdAt);
   const shopId = String(data.shopId ?? '');
   const shopName = String(data.shopName ?? 'Neighborhood Store');
   const shopPhone = String(data.shopPhone ?? '');
@@ -153,18 +156,23 @@ function orderFromFirestore(id: string, data: Record<string, unknown>): Order {
     gstTotal: Number(data.gstTotal ?? gstBreakup?.totalTax ?? items.reduce((sum, item) => sum + item.gstAmount, 0)),
     platformCommission: Number(data.platformCommission ?? 0),
     totalAmount: Number(data.totalAmount ?? 0),
-    status: (data.status as Order['status']) ?? 'pending_confirmation',
+    status: normalizeOrderStatus(data.status || 'pending_confirmation'),
     paymentMethod: (data.paymentMethod as PaymentMethod) ?? 'cash_on_delivery',
-    paymentStatus: (data.paymentStatus as Order['paymentStatus']) ?? 'pending',
-    statusHistory: Array.isArray(data.statusHistory) ? data.statusHistory as Order['statusHistory'] : [],
+    paymentStatus: normalizePaymentStatus(data.paymentStatus),
+    refundAmount: typeof data.refundAmount === 'number' ? data.refundAmount : undefined,
+    shopArchived: data.shopArchived === true,
+    statusHistory: Array.isArray(data.statusHistory) ? data.statusHistory.map((entry) => {
+      const item = entry as Record<string, unknown>;
+      return { ...item, status: normalizeOrderStatus(item.status), timestamp: normalizeFirestoreDate(item.timestamp, createdAt) };
+    }) as Order['statusHistory'] : [],
     delivery: {
       orderId: String(rawDelivery?.orderId ?? id),
       shopId: String(rawDelivery?.shopId ?? shopId),
       deliveryAgentName: String(rawDelivery?.deliveryAgentName ?? `${shopName} Staff`),
       deliveryAgentPhone: String(rawDelivery?.deliveryAgentPhone ?? shopPhone),
-      assignedAt: String(rawDelivery?.assignedAt ?? createdAt),
-      dispatchedAt: rawDelivery?.dispatchedAt,
-      deliveredAt: rawDelivery?.deliveredAt,
+      assignedAt: normalizeFirestoreDate(rawDelivery?.assignedAt, createdAt),
+      dispatchedAt: rawDelivery?.dispatchedAt ? normalizeFirestoreDate(rawDelivery.dispatchedAt) : undefined,
+      deliveredAt: rawDelivery?.deliveredAt ? normalizeFirestoreDate(rawDelivery.deliveredAt) : undefined,
       otpCode: String(rawDelivery?.otpCode ?? data.verificationOTP ?? ''),
       otpVerified: Boolean(rawDelivery?.otpVerified),
       notes: rawDelivery?.notes,
@@ -175,14 +183,69 @@ function orderFromFirestore(id: string, data: Record<string, unknown>): Order {
     invoiceIssue: typeof data.invoiceIssue === 'string' ? data.invoiceIssue : undefined,
     estimatedDeliveryTime: String(data.estimatedDeliveryTime ?? ''),
     createdAt,
-    updatedAt: String(data.updatedAt ?? createdAt),
+    updatedAt: normalizeFirestoreDate(data.updatedAt, createdAt),
   };
+}
+
+export async function archiveClosedOrderForShop(
+  orderId: string,
+  shopId: string,
+  ownerId: string
+): Promise<void> {
+  if (!isFirebaseConfigured) {
+    throw new Error('Order archival requires marketplace cloud sync.');
+  }
+  if (!shopId || !orderId || auth.currentUser?.uid !== ownerId) {
+    throw new Error('The signed-in shopkeeper does not match this order action.');
+  }
+
+  await assertFirebaseReachable();
+  const orderRef = doc(db, 'orders', orderId);
+  const shopRef = doc(db, 'shops', shopId);
+  let archivedOrder: Order | null = null;
+  await runTransaction(db, async (transaction) => {
+    const [orderSnapshot, shopSnapshot] = await Promise.all([
+      transaction.get(orderRef),
+      transaction.get(shopRef),
+    ]);
+    const isOriginalOwner = shopSnapshot.exists() && shopSnapshot.data().ownerId === ownerId;
+    let isLinkedApprovedShopkeeper = false;
+    if (!isOriginalOwner) {
+      const userSnapshot = await transaction.get(doc(db, 'users', ownerId));
+      const userData = userSnapshot.exists() ? userSnapshot.data() : null;
+      isLinkedApprovedShopkeeper = userData?.role === 'shopkeeper'
+        && userData?.shopkeeperStatus === 'approved'
+        && userData?.shopId === shopId;
+    }
+    if (!orderSnapshot.exists()) throw new Error('Order not found.');
+    if (!shopSnapshot.exists() || (!isOriginalOwner && !isLinkedApprovedShopkeeper) ||
+        shopSnapshot.data().verificationStatus !== 'verified') {
+      throw new Error('You are not authorized to archive this shop order.');
+    }
+
+    const order = orderFromFirestore(orderSnapshot.id, orderSnapshot.data() as Record<string, unknown>);
+    if (order.shopId !== shopId) {
+      throw new Error('This order does not belong to your shop.');
+    }
+    if (!canArchiveShopOrder(order)) {
+      throw new Error('Only rejected, cancelled, or pending unpaid orders can be archived. Completed marketplace sales are retained.');
+    }
+
+    transaction.update(orderRef, {
+      shopArchived: true,
+      shopArchivedAt: serverTimestamp(),
+      shopArchivedBy: ownerId,
+    });
+    archivedOrder = { ...order, shopArchived: true };
+  });
+  if (archivedOrder) dbStore.addExternalOrder(archivedOrder);
 }
 
 export function subscribeToOrders(
   customerId: string,
   shopId?: string,
-  onShopSyncError?: (error: Error) => void
+  onShopSyncError?: (error: Error) => void,
+  onShopOrdersUpdate?: (orders: Order[]) => void
 ): Unsubscribe {
   if (!isFirebaseConfigured || !customerId) return () => {};
 
@@ -190,7 +253,8 @@ export function subscribeToOrders(
   const ordersRef = collection(db, 'orders');
   const subscribe = (
     filters: { customerId?: string; shopId?: string },
-    onError?: (error: Error) => void
+    onError?: (error: Error) => void,
+    onUpdate?: (orders: Order[]) => void
   ) => {
     const [field, value] = filters.shopId
       ? ['shopId', filters.shopId]
@@ -206,6 +270,7 @@ export function subscribeToOrders(
           ))
           .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
         dbStore.syncOrdersFromFirestore(orders, filters);
+        onUpdate?.(orders);
       },
       (error) => {
         console.error('Firestore order sync failed:', error);
@@ -216,7 +281,7 @@ export function subscribeToOrders(
 
   try {
     subscribe({ customerId });
-    if (shopId && shopId !== customerId) subscribe({ shopId }, onShopSyncError);
+    if (shopId && shopId !== customerId) subscribe({ shopId }, onShopSyncError, onShopOrdersUpdate);
   } catch (error) {
     unsubscribers.forEach((unsubscribe) => unsubscribe());
     console.error('Firestore order sync could not start:', error);
@@ -346,6 +411,20 @@ export async function transitionFirestoreOrderStatus(
         }))
       : [];
     const productSnapshots = await Promise.all(productEntries.map(({ ref }) => transaction.get(ref)));
+    const rawOrderItems = Array.isArray(orderSnapshot.data()?.items)
+      ? orderSnapshot.data()!.items as Record<string, unknown>[]
+      : [];
+    const stockRestoration = Object.fromEntries(productEntries.map(({ ref, quantity }) => {
+      const matchingItems = rawOrderItems.filter((item) => String(item.productId ?? '') === ref.id);
+      if (matchingItems.length !== 1) {
+        throw new Error('This order has duplicate product lines that cannot be safely restored automatically.');
+      }
+      return [ref.id, { quantity, item: matchingItems[0] }];
+    }));
+    if (restoreStock && productEntries.length > 0) {
+      updates.stockRestoration = stockRestoration;
+      updatedOrder = { ...updatedOrder, stockRestoration } as Order;
+    }
     if (invoiceDocumentData) transaction.set(invoiceRef, invoiceDocumentData);
     if (Object.keys(updates).length) transaction.update(orderRef, updates);
     if (shopCustomerSnapshot.exists()) {
@@ -366,7 +445,12 @@ export async function transitionFirestoreOrderStatus(
       if (!snapshot.exists()) return;
       const ref = productEntries[index].ref;
       const stock = Number(snapshot.data().stockQuantity ?? 0) + productEntries[index].quantity;
-      transaction.update(ref, { stockQuantity: stock, isAvailable: stock > 0, updatedAt: now });
+      transaction.update(ref, {
+        stockQuantity: stock,
+        isAvailable: stock > 0,
+        updatedAt: now,
+        stockRestoreOrderId: order.id,
+      });
     });
     result = updatedOrder;
   });

@@ -1,6 +1,6 @@
 {
   "name": "dukan-yantra-desktop",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Dukan Yantra desktop application shell",
   "author": "Dukan Yantra",
   "private": true,
@@ -31,7 +31,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "icons/dukanyantra.ico",
