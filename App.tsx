@@ -13,12 +13,19 @@ import {
   Tag, ChevronRight, Eye, Star, RotateCcw, LogOut,
   Globe, Copy, Store, ChevronDown,
   Wallet, CreditCard, Gift, Award, Download,
-  HardDrive
+  HardDrive, ShieldCheck
 } from "lucide-react";
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, PieChart, Pie, Cell
 } from "recharts";
+import { BarcodeCameraScanner } from "./src/app/BarcodeCameraScanner";
+import { PrivacySettingsDialog } from "./src/app/PrivacySettingsDialog";
+import {
+  clearScannerPreference, detectDeviceProfile, readScannerPreference,
+  ScanDeduplicator, writeScannerPreference, type ScannerMethod,
+} from "./src/app/barcodeScanning";
+import { readPrivacyConsent, writePrivacyConsent, type PrivacyConsent } from "./src/app/privacyConsent";
 
 const env = (import.meta as any).env as { VITE_API_BASE?: string; DEV?: boolean };
 const API_BASE = env.VITE_API_BASE || "/api";
@@ -838,7 +845,7 @@ function InventoryView({ products, setProducts }: { products: Product[]; setProd
 }
 
 // ─── Invoice Generator ────────────────────────────────────────────────────────
-function InvoiceView({ products, customers, profile, settings, onSave, onNavigate, nextInvoiceLabel, editInvoice, onDoneEditing, partyRates }: {
+function InvoiceView({ products, customers, profile, settings, onSave, onNavigate, nextInvoiceLabel, editInvoice, onDoneEditing, partyRates, scannerPreference, onScanMethodSelected }: {
   products: Product[]; customers: Customer[]; profile: Profile; settings: AppSettings;
   onSave: (inv: InvoiceRecord) => void;
   onNavigate: (tab: Tab) => void;
@@ -846,6 +853,8 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
   editInvoice?: InvoiceRecord | null;
   onDoneEditing?: () => void;
   partyRates: PartyRate[];
+  scannerPreference: ScannerMethod;
+  onScanMethodSelected: (method: ScannerMethod) => void;
 }) {
   const isEditMode = !!editInvoice;
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(() => {
@@ -862,10 +871,17 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
   const [saved, setSaved] = useState(false);
   const [scanCode, setScanCode] = useState("");
   const [scanMessage, setScanMessage] = useState("");
+  const barcodeInputRef = useRef<HTMLInputElement | null>(null);
+  const scanDeduplicatorRef = useRef(new ScanDeduplicator());
+  const device = detectDeviceProfile();
   const [saleType, setSaleType] = useState<"normal" | "cash">(editInvoice?.saleType || "normal");
   const [invoiceKind, setInvoiceKind] = useState<"tax" | "regular">(editInvoice?.invoiceKind || "tax");
   const [invoiceTemplate, setInvoiceTemplate] = useState<InvoiceTemplate>((editInvoice?.invoiceTemplate as InvoiceTemplate) || "modern");
   const invoiceNo = editInvoice?.id || nextInvoiceLabel;
+
+  useEffect(() => {
+    if (!device.isMobileOrTablet) barcodeInputRef.current?.focus();
+  }, [device.isMobileOrTablet]);
 
   // Re-apply party-specific pricing whenever the selected customer changes (not in edit mode, to avoid overwriting historical prices)
   useEffect(() => {
@@ -898,19 +914,25 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
     return rate ? rate.customPrice : defaultPrice;
   };
 
-  const handleScanCode = (code: string) => {
+  const handleScanCode = (code: string, method: ScannerMethod = "keyboard") => {
     const trimmed = normalizeScanCode(code);
     if (!trimmed) {
       setScanMessage("");
       return;
     }
+    if (!scanDeduplicatorRef.current.shouldAccept(trimmed)) {
+      setScanCode("");
+      return;
+    }
+    onScanMethodSelected(method);
     const product = products.find((p) =>
       normalizeScanCode(p.barcode) === trimmed ||
       normalizeScanCode(p.sku) === trimmed ||
       normalizeLookup(p.name) === normalizeLookup(trimmed)
     );
     if (!product) {
-      setScanMessage("No matching registered product found for this QR/barcode.");
+      setScanMessage(`Barcode or SKU "${trimmed}" was not found. Retry or add the product to inventory.`);
+      setScanCode("");
       return;
     }
     const effectivePrice = getEffectivePrice(product.id, product.price);
@@ -1357,18 +1379,44 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
               )}
               <div className="mt-4 space-y-3">
                 <div>
-                  <label className="block text-xs font-medium text-muted-foreground mb-1">Scan Registered Barcode</label>
-                  <div className="flex gap-2">
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <label htmlFor="invoice-barcode-input" className="text-xs font-medium text-muted-foreground">Scan Registered Barcode</label>
+                    <span className="text-[10px] text-muted-foreground">Preferred: {scannerPreference === "camera" ? "Camera" : "Keyboard scanner"}</span>
+                  </div>
+                  <div className="flex flex-col gap-2 sm:flex-row">
                     <input
+                      id="invoice-barcode-input"
+                      ref={barcodeInputRef}
                       value={scanCode}
                       onChange={(e) => setScanCode(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && handleScanCode(scanCode)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          handleScanCode(scanCode);
+                        }
+                      }}
                       placeholder="Scan or paste barcode / SKU"
                       className="flex-1 px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
                     />
-                    <button onClick={() => handleScanCode(scanCode)} className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors">Add</button>
+                    <div className="flex flex-wrap gap-2">
+                      <button type="button" onClick={() => handleScanCode(scanCode)} className="min-h-11 flex-1 px-4 py-2 rounded-xl bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors">Add</button>
+                      <BarcodeCameraScanner
+                        onDetected={(code) => handleScanCode(code, "camera")}
+                        onMethodSelected={onScanMethodSelected}
+                      />
+                    </div>
                   </div>
-                  {scanMessage && <p className="mt-2 text-xs text-muted-foreground">{scanMessage}</p>}
+                  {scanMessage && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground" role="status">
+                      <span>{scanMessage}</span>
+                      {scanMessage.includes("was not found") && (
+                        <>
+                          <button type="button" onClick={() => barcodeInputRef.current?.focus()} className="font-semibold text-primary underline">Retry</button>
+                          <button type="button" onClick={() => onNavigate("inventory")} className="font-semibold text-primary underline">Add product</button>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div>
                   <button onClick={() => onNavigate("inventory")} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors shadow-sm">
@@ -1892,11 +1940,14 @@ function InvoicesView({ invoices, onDelete, onNavigateInvoice, onEditInvoice, pr
 
 // ─── Barcode ──────────────────────────────────────────────────────────────────
 // ─── Cash Sale POS Billing ─────────────────────────────────────────────────────
-function CashSaleView({ products, customers, profile, settings, onSave, invoices, devices }: {
+function CashSaleView({ products, customers, profile, settings, onSave, invoices, devices, onNavigate, scannerPreference, onScanMethodSelected }: {
   products: Product[]; customers: Customer[]; profile: Profile; settings: AppSettings;
   onSave: (inv: InvoiceRecord) => void;
   invoices: InvoiceRecord[];
   devices: PaymentDevice[];
+  onNavigate: (tab: Tab) => void;
+  scannerPreference: ScannerMethod;
+  onScanMethodSelected: (method: ScannerMethod) => void;
 }) {
   const makeEmptyRow = (): POSLineItem => ({
     rowId: Math.random().toString(36).slice(2),
@@ -1925,15 +1976,19 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
 
   const cellRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const barcodeInputRef = useRef<HTMLInputElement | null>(null);
+  const device = detectDeviceProfile();
+  const scanDeduplicatorRef = useRef(new ScanDeduplicator());
+  const barcodeTypingRef = useRef<{ rowId: string; startedAt: number; charCount: number } | null>(null);
+  const [scanMessage, setScanMessage] = useState("");
 
   // Keep cursor on barcode column of last row after any row changes (continuous scanning)
   useEffect(() => {
     const lastRow = rows[rows.length - 1];
-    if (lastRow && !lastRow.name) {
+    if (lastRow && !lastRow.name && !device.isMobileOrTablet) {
       const el = cellRefs.current[`${lastRow.rowId}-barcode`];
       el?.focus();
     }
-  }, [rows.length]);
+  }, [rows.length, device.isMobileOrTablet]);
 
   const COLS = ["barcode", "itemCode", "name", "qty", "unit", "rate", "discountPct", "taxPct"] as const;
 
@@ -1964,10 +2019,21 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
     ) || null;
   };
 
-  const handleBarcodeEnter = (rowId: string, value: string) => {
+  const handleBarcodeEnter = (rowId: string, value: string, method: ScannerMethod | null = null) => {
+    const trimmed = normalizeScanCode(value);
+    if (!trimmed) return;
+    if (!scanDeduplicatorRef.current.shouldAccept(trimmed)) {
+      updateRow(rowId, "barcode", "");
+      return;
+    }
+    onScanMethodSelected(method || "keyboard");
     const product = matchProduct(value);
     if (!product) {
-      // allow free-text item name fallback: move it into name field, clear barcode
+      if (method) {
+        updateRow(rowId, "barcode", "");
+        setScanMessage(`Barcode "${trimmed}" was not found. Retry or add the product to inventory.`);
+        return;
+      }
       updateRow(rowId, "name", value);
       updateRow(rowId, "barcode", "");
       const idx = rows.findIndex((r) => r.rowId === rowId);
@@ -1977,7 +2043,10 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
     setRows((prev) => {
       const existing = prev.find((r) => r.productId === product.id);
       if (existing) {
-        return prev.map((r) => (r.productId === product.id ? { ...r, qty: r.qty + 1 } : r));
+        return prev.map((r) => {
+          if (r.productId === product.id) return { ...r, qty: r.qty + 1 };
+          return r.rowId === rowId ? { ...r, barcode: "" } : r;
+        });
       }
       return prev.map((r) =>
         r.rowId === rowId
@@ -1985,6 +2054,7 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
           : r
       );
     });
+    setScanMessage(`Added ${product.name} to the sale.`);
     // Always append a fresh empty row at bottom and refocus its barcode cell
     setRows((prev) => {
       const hasEmptyTrailing = prev[prev.length - 1] && !prev[prev.length - 1].name;
@@ -1994,11 +2064,25 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
 
   const handleKeyNav = (e: React.KeyboardEvent<HTMLInputElement>, rowIdx: number, colIdx: number) => {
     const row = rows[rowIdx];
+    if (colIdx === 0 && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const now = Date.now();
+      const previous = barcodeTypingRef.current;
+      if (!previous || previous.rowId !== row.rowId || now - previous.startedAt > 1200) {
+        barcodeTypingRef.current = { rowId: row.rowId, startedAt: now, charCount: 1 };
+      } else {
+        barcodeTypingRef.current = { ...previous, charCount: previous.charCount + 1 };
+      }
+    }
     if (e.key === "Enter" || e.key === "Tab") {
       e.preventDefault();
       const col = COLS[colIdx];
       if (col === "barcode") {
-        handleBarcodeEnter(row.rowId, (e.target as HTMLInputElement).value);
+        const typing = barcodeTypingRef.current;
+        const code = (e.target as HTMLInputElement).value;
+        const fromScanner = (/^\d{8,}$/.test(normalizeScanCode(code))) ||
+          (!!typing && typing.rowId === row.rowId && typing.charCount >= 4 && Date.now() - typing.startedAt <= 1200);
+        barcodeTypingRef.current = null;
+        handleBarcodeEnter(row.rowId, code, fromScanner ? "keyboard" : null);
         return;
       }
       let nextCol = colIdx + 1;
@@ -2247,6 +2331,35 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
         </div>
       </div>
 
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-card px-4 py-3">
+        <div>
+          <p className="text-sm font-semibold text-foreground">Barcode scanning</p>
+          <p className="text-xs text-muted-foreground">
+            {device.isMobileOrTablet
+              ? `Use a keyboard scanner or camera. Preferred: ${scannerPreference === "camera" ? "camera" : "keyboard scanner"}.`
+              : "Use an external USB/Bluetooth keyboard scanner or enter a barcode manually."}
+          </p>
+          {scanMessage && (
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground" role="status">
+              <span>{scanMessage}</span>
+              {scanMessage.includes("was not found") && (
+                <>
+                  <button type="button" onClick={() => barcodeInputRef.current?.focus()} className="font-semibold text-primary underline">Retry</button>
+                  <button type="button" onClick={() => onNavigate("inventory")} className="font-semibold text-primary underline">Add product</button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+        <BarcodeCameraScanner
+          onDetected={(code) => {
+            const target = rows.find((row) => !row.name) || rows[rows.length - 1];
+            if (target) handleBarcodeEnter(target.rowId, code, "camera");
+          }}
+          onMethodSelected={onScanMethodSelected}
+        />
+      </div>
+
       {/* Excel-style grid */}
       <div className="flex-1 overflow-auto bg-white dark:bg-card">
         <table className="w-full text-xs border-collapse">
@@ -2271,7 +2384,7 @@ function CashSaleView({ products, customers, profile, settings, onSave, invoices
                 <td className="px-2 py-1 text-center text-muted-foreground border-r border-border/60">{rowIdx + 1}</td>
                 <td className="border-r border-border/60 p-0">
                   <input
-                    ref={(el) => { cellRefs.current[`${row.rowId}-barcode`] = el; if (rowIdx === 0) barcodeInputRef.current = el; }}
+                    ref={(el) => { cellRefs.current[`${row.rowId}-barcode`] = el; if (rowIdx === 0 || rowIdx === rows.length - 1) barcodeInputRef.current = el; }}
                     value={row.barcode}
                     onChange={(e) => updateRow(row.rowId, "barcode", e.target.value)}
                     onKeyDown={(e) => handleKeyNav(e, rowIdx, 0)}
@@ -3863,9 +3976,11 @@ function CustomersView({ customers, setCustomers, profile }: {
 }
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
-function SettingsView({ settings, setSettings, profile, setProfile }: {
+function SettingsView({ settings, setSettings, profile, setProfile, privacyConsent, onOpenPrivacySettings }: {
   settings: AppSettings; setSettings: (v: AppSettings | ((p: AppSettings) => AppSettings)) => void;
   profile: Profile; setProfile: (v: Profile | ((p: Profile) => Profile)) => void;
+  privacyConsent: PrivacyConsent | null;
+  onOpenPrivacySettings: () => void;
 }) {
   const [saved, setSaved] = useState(false);
   const [localProfile, setLocalProfile] = useState(profile);
@@ -3959,6 +4074,16 @@ function SettingsView({ settings, setSettings, profile, setProfile }: {
           </div>
         </div>
       </div>
+      <div className="bg-card rounded-xl p-5 border border-border shadow-sm">
+        <h3 className="font-semibold text-foreground">Privacy & Storage</h3>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Optional scanner preference storage is {privacyConsent?.optionalStorage ? "enabled" : "disabled"}.
+          Essential business data remains available for core billing features.
+        </p>
+        <button type="button" onClick={onOpenPrivacySettings}
+          className="mt-3 min-h-11 rounded-lg border border-primary px-4 py-2 text-sm font-medium text-primary hover:bg-primary/5 focus:outline-none focus:ring-2 focus:ring-primary/40">
+          Review privacy settings
+        </button>
       </div>
     </div>
   );
@@ -4655,6 +4780,12 @@ export default function App() {
   const [sessionUser, setSessionUser] = useState<AuthSessionUser | null>(() => getLocalAuth());
   const [tab, setTab] = useState<Tab>("dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [privacyConsent, setPrivacyConsent] = useState<PrivacyConsent | null>(() => readPrivacyConsent());
+  const [privacyOpen, setPrivacyOpen] = useState(() => readPrivacyConsent() === null);
+  const [privacyStorageError, setPrivacyStorageError] = useState(false);
+  const [scannerPreference, setScannerPreference] = useState<ScannerMethod>(
+    () => readScannerPreference(readPrivacyConsent()?.optionalStorage ?? false) || "keyboard",
+  );
 
   const handleModuleOpen = (moduleId: string) => {
     const routeMap: Record<string, Tab> = {
@@ -4709,6 +4840,28 @@ export default function App() {
     localStorage.removeItem(LOCAL_AUTH_KEY);
     setSessionUser(null);
     setActiveBusinessId("");
+  };
+
+  const handleScanMethodSelected = (method: ScannerMethod) => {
+    setScannerPreference(method);
+    if (privacyConsent?.optionalStorage && !writeScannerPreference(method, true)) {
+      setPrivacyStorageError(true);
+    }
+  };
+
+  const handlePrivacySave = (optionalStorage: boolean) => {
+    const savedConsent = writePrivacyConsent(optionalStorage);
+    setPrivacyConsent(savedConsent || { optionalStorage, savedAt: new Date().toISOString() });
+    let preferenceRemoved = true;
+    if (optionalStorage) {
+      const savedPreference = readScannerPreference(true);
+      if (savedPreference) setScannerPreference(savedPreference);
+    } else {
+      setScannerPreference("keyboard");
+      preferenceRemoved = clearScannerPreference();
+    }
+    setPrivacyStorageError(!savedConsent || !preferenceRemoved);
+    setPrivacyOpen(false);
   };
 
   const activateAccount = (account: BusinessAccount) => {
@@ -4854,15 +5007,15 @@ export default function App() {
       case "system":     return <SystemFoundationView />;
       case "demand":     return <DemandView demands={demands} setDemands={setDemands} customers={customers} />;
       case "inventory":  return <InventoryView products={products} setProducts={setProducts} />;
-      case "invoice":    return <InvoiceView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} onNavigate={handleNav} nextInvoiceLabel={nextInvoiceLabel} editInvoice={editingInvoice} onDoneEditing={() => { setEditingInvoiceId(null); handleNav("invoices"); }} partyRates={partyRates} />;
+      case "invoice":    return <InvoiceView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} onNavigate={handleNav} nextInvoiceLabel={nextInvoiceLabel} editInvoice={editingInvoice} onDoneEditing={() => { setEditingInvoiceId(null); handleNav("invoices"); }} partyRates={partyRates} scannerPreference={scannerPreference} onScanMethodSelected={handleScanMethodSelected} />;
       case "invoices":   return <InvoicesView invoices={invoices} onDelete={(id) => setInvoices((prev) => prev.filter((inv) => inv.id !== id))} onNavigateInvoice={() => { setEditingInvoiceId(null); handleNav("invoice"); }} onEditInvoice={(id) => { setEditingInvoiceId(id); handleNav("invoice"); }} profile={profile} />;
-      case "cashsale":   return <CashSaleView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} invoices={invoices} devices={paymentDevices} />;
+      case "cashsale":   return <CashSaleView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} invoices={invoices} devices={paymentDevices} onNavigate={handleNav} scannerPreference={scannerPreference} onScanMethodSelected={handleScanMethodSelected} />;
       case "posdevices": return <PaymentDevicesView devices={paymentDevices} setDevices={setPaymentDevices} invoices={invoices} />;
       case "barcode":    return <BarcodeView products={products} />;
       case "ppi":        return <ClosedPPIView cards={ppiCards} setCards={setPpiCards} profile={profile} />;
       case "gst":        return <GSTView profile={profile} />;
       case "customers":  return <CustomersView customers={customers} setCustomers={setCustomers} profile={profile} />;
-      case "settings":   return <SettingsView settings={settings} setSettings={setSettings} profile={profile} setProfile={setProfile} />;
+      case "settings":   return <SettingsView settings={settings} setSettings={setSettings} profile={profile} setProfile={setProfile} privacyConsent={privacyConsent} onOpenPrivacySettings={() => setPrivacyOpen(true)} />;
       case "profile":    return <ProfileView profile={profile} setProfile={setProfile} invoices={invoices} products={products} customers={customers} />;
       case "reminders":  return <RemindersView reminders={reminders} setReminders={setReminders} />;
       case "rates":      return <PartyRatesView partyRates={partyRates} setPartyRates={setPartyRates} customers={customers} products={products} />;
@@ -4923,6 +5076,10 @@ export default function App() {
               <p className="font-medium text-foreground">{profile.shopName}</p>
               <p className="font-[DM_Mono]">{profile.businessId}</p>
             </div>
+            <button type="button" onClick={() => setPrivacyOpen(true)} title="Privacy settings" aria-label="Privacy settings"
+              className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-border px-2.5 text-xs font-medium text-muted-foreground hover:bg-muted focus:outline-none focus:ring-2 focus:ring-primary/40">
+              <ShieldCheck className="h-4 w-4" /><span className="hidden sm:inline">Privacy</span>
+            </button>
             <button onClick={handleLogout}
               title="Sign out"
               className="w-8 h-8 rounded-full border border-border flex items-center justify-center text-muted-foreground hover:bg-muted transition-colors">
@@ -4936,6 +5093,11 @@ export default function App() {
         </header>
 
         <main className="flex-1 overflow-y-auto p-4 lg:p-6">
+          {privacyStorageError && (
+            <p className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800" role="alert">
+              Your privacy choice or optional scanner preference could not be saved in this browser. BillPilot will keep using your choice for this session only.
+            </p>
+          )}
           {renderView()}
         </main>
 
@@ -4953,6 +5115,12 @@ export default function App() {
           </button>
         </nav>
       </div>
+      <PrivacySettingsDialog
+        open={privacyOpen}
+        consent={privacyConsent}
+        onSave={handlePrivacySave}
+        onClose={() => setPrivacyOpen(false)}
+      />
     </div>
   );
 }
