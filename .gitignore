@@ -85,3 +85,6 @@ coverage/
 .eslintcache
 .parcel-cache/
 .turbo/
+
+# Generated Electron release bundles (publish through GitHub Releases, not source history)
+/release-0.1.0/
