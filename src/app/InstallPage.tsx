@@ -8,6 +8,11 @@ import {
   MonitorDown,
   Smartphone,
 } from 'lucide-react';
+import {
+  formatInstallerReleaseDate,
+  formatInstallerSize,
+  windowsInstaller,
+} from './windowsInstallerConfig';
 
 type InstallPlatform =
   | 'windows-supported'
@@ -271,7 +276,17 @@ export default function InstallPage({ onReturn }: InstallPageProps) {
                   <Download size={18} className="text-[#1e40af]" aria-hidden="true" />
                   Windows Desktop Installer
                 </h2>
-                <h3 className="mt-3 text-base font-bold text-slate-900">Dukan Yantra for Windows</h3>
+                <div className="mt-4 flex items-center gap-3">
+                  <img
+                    src="/assets/dukan-yantra-logo.png"
+                    alt=""
+                    className="h-12 w-12 rounded-xl bg-white object-contain p-1"
+                  />
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900">{windowsInstaller.appName}</h3>
+                    <p className="text-sm text-slate-600">Windows desktop application</p>
+                  </div>
+                </div>
                 <p className="mt-2 text-sm leading-6 text-slate-700">
                   Install Dukan Yantra on your Windows computer and access your business management system directly from your desktop.
                 </p>
@@ -282,15 +297,23 @@ export default function InstallPage({ onReturn }: InstallPageProps) {
                   </div>
                   <div className="flex gap-2">
                     <dt className="font-semibold">Version:</dt>
-                    <dd>0.0.1</dd>
+                    <dd>{windowsInstaller.version}</dd>
                   </div>
                   <div className="flex gap-2">
                     <dt className="font-semibold">Installer:</dt>
-                    <dd className="break-all">Dukan.Yantra.Setup.exe</dd>
+                    <dd className="break-all">{windowsInstaller.fileName}</dd>
+                  </div>
+                  <div className="flex gap-2">
+                    <dt className="font-semibold">File size:</dt>
+                    <dd>{formatInstallerSize(windowsInstaller.fileSizeBytes)}</dd>
+                  </div>
+                  <div className="flex gap-2">
+                    <dt className="font-semibold">Released:</dt>
+                    <dd>{formatInstallerReleaseDate(windowsInstaller.releaseDate)}</dd>
                   </div>
                 </dl>
                 <div className="mt-4 flex flex-wrap gap-2" aria-label="Supported operating systems">
-                  {['Windows 10', 'Windows 11'].map((version) => (
+                  {windowsInstaller.supportedOperatingSystems.map((version) => (
                     <span
                       key={version}
                       className="rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-medium text-slate-700"
@@ -300,14 +323,15 @@ export default function InstallPage({ onReturn }: InstallPageProps) {
                   ))}
                 </div>
                 <a
-                  href="https://github.com/hardikkatare10-ux/billpilot/releases/download/v0.0.1/Dukan.Yantra.Setup.exe"
-                  target="_blank"
-                  rel="noopener noreferrer"
+                  href={windowsInstaller.downloadUrl}
                   className="mt-5 inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-[#1e40af] px-5 text-sm font-semibold text-white transition-colors hover:bg-blue-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1e40af] focus-visible:ring-offset-2"
                 >
                   <Download size={16} aria-hidden="true" />
-                  Download Dukan Yantra for Windows
+                  Download for Windows
                 </a>
+                <p className="mt-2 text-xs text-slate-600">
+                  The installer is for Windows 10 and Windows 11.
+                </p>
                 <h3 className="mt-5 text-sm font-bold text-slate-900">Installation instructions</h3>
                 <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs leading-5 text-slate-600">
                   <li>Open the downloaded installer.</li>
@@ -318,6 +342,14 @@ export default function InstallPage({ onReturn }: InstallPageProps) {
                 <p className="mt-4 text-xs leading-5 text-slate-600">
                   The Windows desktop installer is separate from the browser-based PWA installation option.
                 </p>
+                <a
+                  href={windowsInstaller.releaseNotesUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-3 inline-flex text-sm font-semibold text-[#1e40af] underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1e40af]"
+                >
+                  View Release Notes
+                </a>
               </section>
 
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">

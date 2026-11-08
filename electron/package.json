@@ -24,19 +24,33 @@
     "extraResources": [
       {
         "from": "../dist",
-        "to": "dist"
+        "to": "dist",
+        "filter": [
+          "**/*",
+          "!downloads/Dukan Yantra Setup.exe"
+        ]
+      }
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "hardikkatare10-ux",
+        "repo": "billpilot"
       }
     ],
     "win": {
       "target": [
         {
-          "target": "nsis",
+          "target": "nsis-web",
           "arch": [
             "x64"
           ]
         }
       ],
       "icon": "icons/dukanyantra.ico",
+      "artifactName": "Dukan Yantra Setup.${ext}"
+    },
+    "nsisWeb": {
       "artifactName": "Dukan Yantra Setup.${ext}"
     },
     "nsis": {

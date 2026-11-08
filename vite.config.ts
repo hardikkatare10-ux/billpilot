@@ -2,7 +2,6 @@ import { defineConfig } from 'vite'
 import path from 'path'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
-import { loadEnv } from 'vite'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
@@ -22,14 +21,11 @@ function figmaAssetResolver() {
   }
 }
 
-export default defineConfig(({ mode }) => {
-  const buildEnv = loadEnv(mode, rootDir, '')
+export default defineConfig(() => {
   const packageVersion = JSON.parse(readFileSync(path.join(rootDir, 'package.json'), 'utf8')).version
   return ({
   define: {
     __APP_VERSION__: JSON.stringify(packageVersion),
-    __WINDOWS_INSTALLER_URL__: JSON.stringify(buildEnv.VITE_WINDOWS_INSTALLER_URL || ''),
-    __WINDOWS_INSTALLER_SIZE__: JSON.stringify(buildEnv.VITE_WINDOWS_INSTALLER_SIZE || ''),
   },
   base: '/',
   plugins: [

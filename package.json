@@ -13,7 +13,7 @@
     "electron": "electron . --dev",
     "electron:dev": "electron . --dev",
     "electron:dir": "npm run build && electron-builder --projectDir electron --dir",
-    "electron:build": "npm run build && electron-builder --projectDir electron --win nsis --x64",
+    "electron:build": "npm run build && electron-builder --projectDir electron --win nsis-web --x64",
     "dev:backend": "node server/index.js",
     "backend": "node server/index.js",
     "start": "node server/index.js",

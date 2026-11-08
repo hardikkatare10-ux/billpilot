@@ -25,26 +25,33 @@ npm run electron:dir
 
 This runs the existing production Vite build and packages an unpacked Windows app under `release/win-unpacked/`. Launch `Dukan Yantra.exe` there to smoke-test the packaged build before installer creation.
 
-## Create the Windows installer
+## Create the Windows web installer
 
 ```powershell
 npm run electron:build
 ```
 
-The NSIS installer is written to `release/Dukan Yantra Setup.exe`. It creates desktop and Start Menu shortcuts, allows the user to select an install directory, and preserves app data when uninstalled. No installer is uploaded or deployed by this command.
+This creates `release/nsis-web/Dukan Yantra Setup.exe`, a small NSIS web installer, and `release/nsis-web/dukan-yantra-desktop-<version>-x64.nsis.7z`, the separate app package. The setup downloads that package from the configured GitHub release during installation, so users need an internet connection. It creates desktop and Start Menu shortcuts, allows the user to select an install directory, and preserves app data when uninstalled.
+
+Publish both generated assets to the GitHub release for the matching app version. The web installer looks for the package at the release URL computed from the GitHub publish configuration in `electron/package.json`; publishing only the setup executable will leave installation incomplete. The installer payload excludes the website's copy of any prior setup executable to prevent recursively bundling it.
+
+To keep the setup under 25 MB, check the size of `release/nsis-web/Dukan Yantra Setup.exe` after each build. The `.nsis.7z` payload is the full application and is expected to be larger.
 
 The installer is currently unsigned. For customer distribution, obtain and configure a trusted Windows code-signing certificate; do not advise users to bypass SmartScreen warnings.
 
 ## Website download link
 
-The `/install` page only displays a download link on detected Windows 10/11 when a real HTTPS installer URL is configured at Vite build time:
+The `/install` page links directly to the published Windows installer in GitHub Release `v0.0.1` and displays its verified filename, size, version, release date, supported Windows versions, and release notes. The public release values are the defaults in `src/app/windowsInstallerConfig.ts`; no environment file is required. To override them for a later release, set these Vite variables at website build time:
 
 ```dotenv
-VITE_WINDOWS_INSTALLER_URL=https://downloads.example.com/Dukan%20Yantra%20Setup.exe
-VITE_WINDOWS_INSTALLER_SIZE=120 MB
+VITE_WINDOWS_INSTALLER_URL=https://github.com/hardikkatare10-ux/billpilot/releases/download/v0.0.1/Dukan.Yantra.Setup.exe
+VITE_WINDOWS_INSTALLER_SIZE_BYTES=1065309
+VITE_WINDOWS_INSTALLER_VERSION=0.0.1
+VITE_WINDOWS_INSTALLER_RELEASE_DATE=2026-11-08T05:18:39Z
+VITE_WINDOWS_INSTALLER_RELEASE_NOTES_URL=https://github.com/hardikkatare10-ux/billpilot/releases/tag/v0.0.1
 ```
 
-The values above are examples, not working links. Do not configure them until the generated installer has been published at a verified URL. Electron installers are large; host the release asset on a public GitHub Release or a dedicated object-storage/CDN download host rather than bundling it into the Vercel static deployment. This repository does not currently have a configured public installer release URL. Set the size string only after measuring the hosted artifact. Rebuild and deploy the website after configuring the URL.
+These settings are public browser configuration; never put GitHub credentials in Vite variables. Rebuild and deploy the website after changing them.
 
 ## Runtime and security notes
 
