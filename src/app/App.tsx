@@ -7,7 +7,6 @@ import { useConnectivity } from "../context/ConnectivityContext";
 import dukanYantraLogo from "../icon.png";
 import { connectPosDevice, discoverPosDevices, type PosDeviceInfo } from "./posDeviceIntegration";
 import { CameraScanButton, CameraScannerModal, FirstRunSetup, useDeviceType, useHardwareScanner } from "./deviceAndScan";
-import InstallAppLink from "./components/InstallAppLink";
 import {
   LayoutDashboard, ShoppingCart, Package, FileText, QrCode,
   Building2, Users, Settings, User, Plus, Search, Bell,
@@ -7628,7 +7627,6 @@ function BillingApp({
           </button>
           <h1 className="font-semibold text-foreground">{TITLES[tab]}</h1>
           <div className="ml-auto flex items-center gap-2">
-            <InstallAppLink />
             {onSwitchToConsumer && (
               <button
                 onClick={onSwitchToConsumer}

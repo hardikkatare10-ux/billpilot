@@ -2,6 +2,8 @@ import { createRoot } from "react-dom/client";
 import UnifiedApp from "./UnifiedApp";
 import "./styles/index.css";
 
+window.addEventListener("beforeinstallprompt", (event) => event.preventDefault());
+
 // Google Maps Platform global quota defense
 if (typeof window !== "undefined") {
   (window as any).gm_authFailure = () => {

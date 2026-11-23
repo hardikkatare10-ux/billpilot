@@ -39,20 +39,6 @@ To keep the setup under 25 MB, check the size of `release/nsis-web/Dukan Yantra 
 
 The installer is currently unsigned. For customer distribution, obtain and configure a trusted Windows code-signing certificate; do not advise users to bypass SmartScreen warnings.
 
-## Website download link
-
-The `/install` page links directly to the published Windows installer in GitHub Release `v0.0.1` and displays its verified filename, size, version, release date, supported Windows versions, and release notes. The public release values are the defaults in `src/app/windowsInstallerConfig.ts`; no environment file is required. To override them for a later release, set these Vite variables at website build time:
-
-```dotenv
-VITE_WINDOWS_INSTALLER_URL=https://github.com/hardikkatare10-ux/billpilot/releases/download/v0.0.1/Dukan.Yantra.Setup.exe
-VITE_WINDOWS_INSTALLER_SIZE_BYTES=1065309
-VITE_WINDOWS_INSTALLER_VERSION=0.0.1
-VITE_WINDOWS_INSTALLER_RELEASE_DATE=2026-11-08T05:18:39Z
-VITE_WINDOWS_INSTALLER_RELEASE_NOTES_URL=https://github.com/hardikkatare10-ux/billpilot/releases/tag/v0.0.1
-```
-
-These settings are public browser configuration; never put GitHub credentials in Vite variables. Rebuild and deploy the website after changing them.
-
 ## Runtime and security notes
 
 - Production Electron serves the Vite build from a loopback-only HTTP server. This preserves React pathname routing and a localhost web origin for Firebase Auth; it does not use `file://`.

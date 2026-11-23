@@ -20,7 +20,6 @@ import { Order, Shop } from './marketplace/types';
 
 // Components
 import App from './app/App';
-import InstallPage from './app/InstallPage';
 import { Navbar } from './marketplace/components/common/Navbar';
 import { AuthModal } from './marketplace/components/common/AuthModal';
 import { LocationModal } from './marketplace/components/common/LocationModal';
@@ -33,7 +32,6 @@ import { CustomerOrders } from './marketplace/components/customer/CustomerOrders
 import { DisputeModal } from './marketplace/components/customer/DisputeModal';
 import { AdminDashboard } from './marketplace/components/admin/AdminDashboard';
 import { ShopVerificationStatus } from './marketplace/components/common/ShopVerificationStatus';
-import InstallButton from './app/components/InstallButton';
 import { ConnectivityBanner, ConnectivityProvider } from './context/ConnectivityContext';
 import { pathToShopkeeperTab, shopkeeperTabToPath } from './app/shopkeeperRoutes';
 
@@ -152,7 +150,6 @@ const MainAppContent: React.FC = () => {
     if (
       currentUser?.requestedRole === 'shopkeeper' &&
       !isApprovedShopkeeper &&
-      currentRoute !== '/install' &&
       !window.location.pathname.startsWith('/shopkeeper')
     ) {
       navigate('/shopkeeper/dashboard');
@@ -189,10 +186,6 @@ const MainAppContent: React.FC = () => {
       navigate('/consumer');
     }
   }, [currentRoute, openAuthModal, navigate]);
-
-  if (currentRoute === '/install') {
-    return <InstallPage onReturn={() => navigate('/')} />;
-  }
 
   // ─────────────────────────────────────────────────────────────────────────────
   // 1. SHOPKEEPER ROUTE GUARD & INTERFACE
@@ -608,7 +601,6 @@ export default function UnifiedApp() {
             <LocationProvider>
               <CartProvider>
                 <MainAppContent />
-                <InstallButton />
               </CartProvider>
             </LocationProvider>
           </AuthProvider>
