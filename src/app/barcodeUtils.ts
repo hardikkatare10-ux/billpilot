@@ -2,6 +2,12 @@ export type BarcodeFormat = 'EAN13' | 'EAN8' | 'CODE128';
 
 export type A4LayoutPreset = '40' | '48' | '30' | '24' | '4';
 
+export interface BarcodeProductRef {
+  id: number;
+  sku: string;
+  barcode: string;
+}
+
 export const A4_40_LABEL_DIMENSIONS = {
   paperWidthMm: 210,
   paperHeightMm: 297,
@@ -72,6 +78,34 @@ export function isValidBarcodeValue(value: string, format?: BarcodeFormat): bool
     return isValidEan(value);
   }
   return isValidCode128(value);
+}
+
+export function resolveProductBarcode<T extends BarcodeProductRef>(
+  product: T,
+  products: readonly BarcodeProductRef[],
+): string {
+  const savedBarcode = sanitizeBarcodeValue(product.barcode);
+  if (savedBarcode) return savedBarcode;
+
+  const normalize = (value: string) =>
+    value.trim().replace(/\s+/g, '').replace(/[\u200B-\u200D\uFEFF]/g, '').toLowerCase();
+  const isClaimed = (value: string) => products.some((candidate) =>
+    candidate.id !== product.id
+      && [candidate.barcode, candidate.sku].some((candidateValue) =>
+        normalize(candidateValue) === normalize(value),
+      ),
+  );
+  const sku = product.sku.trim().replace(/\s+/g, '').replace(/[\u200B-\u200D\uFEFF]/g, '');
+  if (sku && isValidBarcodeValue(sku) && !isClaimed(sku)) return sku;
+
+  const base = `SKU-${product.id}`;
+  let generated = base;
+  let suffix = 1;
+  while (isClaimed(generated)) {
+    generated = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return generated;
 }
 
 export function buildA4LayoutConfig(

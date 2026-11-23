@@ -36,6 +36,7 @@ import {
   buildA4LayoutConfig,
   detectBarcodeFormat,
   isValidBarcodeValue,
+  resolveProductBarcode,
   sanitizeBarcodeValue,
   type A4LayoutPreset,
   type BarcodeFormat,
@@ -46,7 +47,7 @@ import {
   type CashSaleReturnRecord,
 } from "./cashSaleReturns";
 import { dbStore } from "../marketplace/services/db/store";
-import { createFirestoreProduct } from "../marketplace/services/firebase/productService";
+import { createFirestoreProduct, deleteFirestoreProduct, subscribeToShopProducts } from "../marketplace/services/firebase/productService";
 import type { Shop as LocalShop, Order as LocalOrder, ShopListing as LocalListing, UserAddress } from "../marketplace/types";
 import {
   assertInvoiceTypeAllowed,
@@ -158,7 +159,7 @@ interface InvoiceRecord {
   paidAmount?: number; invoiceTemplate?: string;
   source?: "invoice" | "pos" | "marketplace";
   discountAmount?: number; roundOff?: number;
-  paymentMode?: "cash" | "upi" | "card" | "posdevice" | "mixed";
+  paymentMode?: "cash" | "upi" | "card" | "posdevice" | "mixed" | "ppi";
   paymentSplits?: { mode: string; amount: number }[];
   amountReceived?: number; changeReturned?: number;
   txnRef?: string; posProvider?: PaymentProvider; posTxnId?: string; posStatus?: "pending" | "success" | "failed";
@@ -947,26 +948,28 @@ function DemandView({ demands, setDemands, customers }: { demands: DemandOrder[]
 }
 
 // ─── Inventory ────────────────────────────────────────────────────────────────
-function InventoryView({ products, setProducts, businessCategory, storageKey, openAddForm = false, onQuickActionHandled }: {
+function InventoryView({ products, setProducts, businessCategory, storageKey, shopId, openAddForm = false, onQuickActionHandled, onNavigate }: {
   products: Product[];
   setProducts: (v: Product[] | ((p: Product[]) => Product[])) => void;
   businessCategory: string;
   storageKey: string;
+  shopId?: string;
   openAddForm?: boolean;
   onQuickActionHandled?: () => void;
+  onNavigate?: (tab: Tab) => void;
 }) {
   const { assertCloudSyncAvailable } = useConnectivity();
   const [search, setSearch] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [editId, setEditId] = useState<number | null>(null);
-  const [form, setForm] = useState({ name: "", sku: "", barcode: "", price: "", costPrice: "", stock: "", unit: "Packet", category: businessCategory });
+  const [form, setForm] = useState({ name: "", brand: "", sku: "", barcode: "", description: "", imageUrl: "", price: "", costPrice: "", stock: "", unit: "Packet", category: businessCategory, isPublishedToMarketplace: true });
   const productCategories = Array.from(new Set([businessCategory, "Grocery & Provisions", "Grains", "Pulses", "Oils", "Spices", "Dairy", "Beverages", "Electronics", "Clothing", "Hardware", "Pharmacy", "Stationery", "Others"]));
   const filtered = products.filter((p) => p.name.toLowerCase().includes(search.toLowerCase()) || p.sku.toLowerCase().includes(search.toLowerCase()));
   const lowStock = products.filter((p) => p.stock <= 10).length;
 
-  const openAdd = () => { setForm({ name: "", sku: "", barcode: "", price: "", costPrice: "", stock: "", unit: "Packet", category: businessCategory }); setEditId(null); setShowForm(true); };
-  const openEdit = (p: Product) => { setForm({ name: p.name, sku: p.sku, barcode: p.barcode, price: String(p.price), costPrice: String(p.costPrice), stock: String(p.stock), unit: p.unit, category: p.category }); setEditId(p.id); setShowForm(true); };
+  const openAdd = () => { setForm({ name: "", brand: "", sku: "", barcode: "", description: "", imageUrl: "", price: "", costPrice: "", stock: "", unit: "Packet", category: businessCategory, isPublishedToMarketplace: true }); setEditId(null); setShowForm(true); };
+  const openEdit = (p: Product) => { setForm({ name: p.name, brand: p.brand || "", sku: p.sku, barcode: p.barcode, description: p.description || "", imageUrl: p.imageUrl || "", price: String(p.price), costPrice: String(p.costPrice), stock: String(p.stock), unit: p.unit, category: p.category, isPublishedToMarketplace: p.isPublishedToMarketplace !== false }); setEditId(p.id); setShowForm(true); };
 
   useEffect(() => {
     if (!openAddForm) return;
@@ -996,6 +999,16 @@ function InventoryView({ products, setProducts, businessCategory, storageKey, op
 
   const handleSave = async () => {
     if (!form.name || !form.price) return;
+    const duplicateSku = form.sku.trim() && products.some((product) =>
+      product.id !== editId && product.sku.trim().toLowerCase() === form.sku.trim().toLowerCase()
+    );
+    const duplicateBarcode = form.barcode.trim() && products.some((product) =>
+      product.id !== editId && sanitizeBarcodeValue(product.barcode) === sanitizeBarcodeValue(form.barcode)
+    );
+    if (duplicateSku || duplicateBarcode) {
+      window.alert(duplicateSku ? "That SKU already exists in inventory." : "That barcode already exists in inventory.");
+      return;
+    }
     try {
       await assertCloudSyncAvailable();
       const previousProducts = products;
@@ -1008,13 +1021,17 @@ function InventoryView({ products, setProducts, businessCategory, storageKey, op
             return [...products, {
               id: ts,
               name: form.name,
+              brand: form.brand,
               sku: form.sku || `SKU-${ts}`,
               barcode: form.barcode || `89${ts}`,
+              description: form.description,
+              imageUrl: form.imageUrl,
               price: +form.price,
               costPrice: +form.costPrice,
               stock: +form.stock,
               unit: form.unit,
               category: form.category,
+              isPublishedToMarketplace: form.isPublishedToMarketplace,
             }];
           })();
       setProducts(nextProducts);
@@ -1033,8 +1050,16 @@ function InventoryView({ products, setProducts, businessCategory, storageKey, op
     await assertCloudSyncAvailable();
     const baseId = Math.max(Date.now(), ...products.map((product) => product.id + 1));
     const newProducts: Product[] = [];
+    const seenSkus = new Set(products.map((product) => product.sku.trim().toLowerCase()).filter(Boolean));
+    const seenBarcodes = new Set(products.map((product) => sanitizeBarcodeValue(product.barcode)).filter(Boolean));
     importedProducts.forEach((product, index) => {
       if (!product.name.trim() || product.quantity === null || product.purchasePrice === null || product.sellingPrice === null) return;
+      const sku = product.sku.trim().toLowerCase();
+      const barcode = sanitizeBarcodeValue(product.barcode);
+      if (sku && seenSkus.has(sku)) throw new Error(`SKU "${product.sku.trim()}" already exists in inventory or this import.`);
+      if (barcode && seenBarcodes.has(barcode)) throw new Error(`Barcode "${barcode}" already exists in inventory or this import.`);
+      if (sku) seenSkus.add(sku);
+      if (barcode) seenBarcodes.add(barcode);
       newProducts.push({
         id: baseId + index,
         name: product.name.trim(),
@@ -1045,7 +1070,7 @@ function InventoryView({ products, setProducts, businessCategory, storageKey, op
         stock: product.quantity,
         unit: product.unit.trim(),
         category: product.category.trim(),
-        isPublishedToMarketplace: false,
+        isPublishedToMarketplace: true,
         ...(product.gstRate !== null ? { gstRate: product.gstRate } : {}),
       });
     });
@@ -1063,12 +1088,32 @@ function InventoryView({ products, setProducts, businessCategory, storageKey, op
 
   const handleDeleteProduct = async (productId: number) => {
     const previousProducts = products;
+    const product = products.find((candidate) => candidate.id === productId);
+    const stableListingId = shopId ? `bp_${encodeURIComponent(shopId)}_${encodeURIComponent(String(productId))}` : "";
+    const listing = shopId && product
+      ? dbStore.getListings(shopId).find((candidate) =>
+          candidate.id === stableListingId ||
+          candidate.externalBillPilotItemId === (product.sku?.trim() || product.barcode?.trim() || String(product.id))
+        )
+      : undefined;
     try {
       await assertCloudSyncAvailable();
       setProducts(products.filter((product) => product.id !== productId));
       if (!(await flushPending())) {
         setProducts(previousProducts);
         throw new Error("Cloud sync did not confirm the product deletion. Reconnect and try again.");
+      }
+      if (listing && shopId) {
+        try {
+          await deleteFirestoreProduct(listing.id);
+          dbStore.deleteListing(listing.id, shopId);
+        } catch (error) {
+          setProducts(previousProducts);
+          if (!(await flushPending())) {
+            throw new Error(`Marketplace listing deletion failed and inventory rollback was not confirmed: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          throw error;
+        }
       }
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "Product could not be deleted.");
@@ -1089,6 +1134,9 @@ function InventoryView({ products, setProducts, businessCategory, storageKey, op
             className="w-full pl-9 pr-4 py-2.5 bg-card border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
         </div>
         <div className="flex flex-wrap gap-2 justify-end">
+          <button onClick={() => onNavigate?.("barcode")} className="flex items-center gap-2 px-4 py-2.5 border border-primary/30 bg-primary/5 text-primary rounded-xl text-sm font-medium hover:bg-primary/10 transition-colors">
+            <QrCode className="w-4 h-4" /> Barcode Generator
+          </button>
           <button onClick={() => setShowImport((open) => !open)} className="flex items-center gap-2 px-4 py-2.5 border border-border bg-card text-foreground rounded-xl text-sm font-medium hover:bg-muted transition-colors">
             <FileSpreadsheet className="w-4 h-4" /> Import Excel / CSV
           </button>
@@ -1113,7 +1161,7 @@ function InventoryView({ products, setProducts, businessCategory, storageKey, op
         <div className="bg-card rounded-xl p-5 border border-primary/20 shadow-sm space-y-4">
           <h3 className="font-semibold text-foreground">{editId ? "Edit Product" : "Add New Product"}</h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {[["Product Name *", "name", "text"], ["SKU Code", "sku", "text"], ["Barcode", "barcode", "text"], ["Selling Price (₹) *", "price", "number"], ["Cost Price (₹)", "costPrice", "number"], ["Stock Quantity *", "stock", "number"]].map(([label, key, type]) => (
+            {[["Product Name *", "name", "text"], ["Brand", "brand", "text"], ["SKU Code", "sku", "text"], ["Barcode", "barcode", "text"], ["Image URL", "imageUrl", "url"], ["Selling Price (₹) *", "price", "number"], ["Cost Price (₹)", "costPrice", "number"], ["Stock Quantity *", "stock", "number"]].map(([label, key, type]) => (
               <div key={key as string}>
                 <label className="block text-xs font-medium text-muted-foreground mb-1">{label as string}</label>
                 <div className="flex gap-2">
@@ -1135,7 +1183,15 @@ function InventoryView({ products, setProducts, businessCategory, storageKey, op
                 {productCategories.map((c) => <option key={c}>{c}</option>)}
               </select>
             </div>
+            <div className="sm:col-span-2 lg:col-span-3">
+              <label className="block text-xs font-medium text-muted-foreground mb-1">Description</label>
+              <textarea value={form.description} onChange={(e) => setForm((current) => ({ ...current, description: e.target.value }))} rows={2} className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+            </div>
           </div>
+          <label className="flex items-center gap-2 text-sm text-foreground">
+            <input type="checkbox" checked={form.isPublishedToMarketplace} onChange={(e) => setForm((current) => ({ ...current, isPublishedToMarketplace: e.target.checked }))} />
+            Publish this product to NearBasket
+          </label>
           <div className="flex gap-2 justify-end">
             <button onClick={() => { setShowForm(false); setEditId(null); }} className="px-4 py-2 rounded-lg border border-border text-sm text-muted-foreground hover:bg-muted transition-colors">Cancel</button>
             <button onClick={handleSave} className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors">Save Product</button>
@@ -1158,7 +1214,7 @@ function InventoryView({ products, setProducts, businessCategory, storageKey, op
                 <tr key={p.id} className="border-b border-border/50 hover:bg-muted/20 transition-colors">
                   <td className="px-4 py-3 font-medium text-foreground">{p.name}<br /><span className="text-xs text-muted-foreground font-[DM_Mono]">{p.barcode}</span></td>
                   <td className="px-4 py-3 text-muted-foreground font-[DM_Mono] text-xs">{p.sku}</td>
-                  <td className="px-4 py-3"><span className="px-2 py-0.5 bg-secondary text-secondary-foreground rounded-full text-xs">{p.category}</span></td>
+                  <td className="px-4 py-3"><span className="px-2 py-0.5 bg-secondary text-secondary-foreground rounded-full text-xs">{p.category}</span><br /><span className="text-[10px] text-muted-foreground">{p.isPublishedToMarketplace === false ? "Hidden from NearBasket" : "Published to NearBasket"}</span></td>
                   <td className="px-4 py-3 font-semibold font-[DM_Mono]">{fmt(p.price)}</td>
                   <td className="px-4 py-3"><span className={`font-semibold font-[DM_Mono] ${p.stock <= 10 ? "text-red-500" : p.stock <= 20 ? "text-amber-500" : "text-emerald-600"}`}>{p.stock} {p.unit}{p.stock <= 10 && <span className="ml-1 text-xs font-normal text-red-400">Low</span>}</span></td>
                   <td className="px-4 py-3">
@@ -1178,9 +1234,52 @@ function InventoryView({ products, setProducts, businessCategory, storageKey, op
 }
 
 // ─── Invoice Generator ────────────────────────────────────────────────────────
-function InvoiceView({ products, customers, profile, settings, onSave, onNavigate, nextInvoiceLabel, editInvoice, onDoneEditing, partyRates, gstRegistration, gstRegistrationLoading, shopId, shopOwnerUid }: {
+function InlineCustomerForm({ onCreate, onCancel }: {
+  onCreate: (customer: Pick<Customer, "name" | "phone" | "email" | "address" | "gst">) => Promise<Customer>;
+  onCancel: () => void;
+}) {
+  const [form, setForm] = useState({ name: "", phone: "", email: "", address: "", gst: "" });
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const submit = async () => {
+    if (!form.name.trim()) {
+      setError("Enter the customer's name.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await onCreate({ ...form, name: form.name.trim(), phone: form.phone.trim() });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Customer could not be saved.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 space-y-3 rounded-lg border border-primary/20 bg-background p-3">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <input aria-label="Customer name" value={form.name} onChange={(e) => setForm((current) => ({ ...current, name: e.target.value }))} placeholder="Customer name *" className="rounded-lg border border-border bg-card px-3 py-2 text-sm" />
+        <input aria-label="Customer mobile number" type="tel" value={form.phone} onChange={(e) => setForm((current) => ({ ...current, phone: e.target.value }))} placeholder="Mobile number" className="rounded-lg border border-border bg-card px-3 py-2 text-sm" />
+        <input aria-label="Customer email" type="email" value={form.email} onChange={(e) => setForm((current) => ({ ...current, email: e.target.value }))} placeholder="Email" className="rounded-lg border border-border bg-card px-3 py-2 text-sm" />
+        <input aria-label="Customer GST number" value={form.gst} onChange={(e) => setForm((current) => ({ ...current, gst: e.target.value }))} placeholder="GST number (optional)" className="rounded-lg border border-border bg-card px-3 py-2 text-sm" />
+        <input aria-label="Customer address" value={form.address} onChange={(e) => setForm((current) => ({ ...current, address: e.target.value }))} placeholder="Address" className="rounded-lg border border-border bg-card px-3 py-2 text-sm sm:col-span-2" />
+      </div>
+      {error && <p role="alert" className="text-xs text-red-600">{error}</p>}
+      <div className="flex justify-end gap-2">
+        <button type="button" onClick={onCancel} className="rounded-lg border border-border px-3 py-2 text-xs">Cancel</button>
+        <button type="button" disabled={saving} onClick={() => void submit()} className="rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground disabled:opacity-50">{saving ? "Saving…" : "Save Customer"}</button>
+      </div>
+    </div>
+  );
+}
+
+function InvoiceView({ products, customers, profile, settings, onSave, onAddCustomer, onNavigate, nextInvoiceLabel, editInvoice, onDoneEditing, partyRates, gstRegistration, gstRegistrationLoading, shopId, shopOwnerUid }: {
   products: Product[]; customers: Customer[]; profile: Profile; settings: AppSettings;
   onSave: (inv: InvoiceRecord) => Promise<boolean> | boolean;
+  onAddCustomer: (customer: Pick<Customer, "name" | "phone" | "email" | "address" | "gst">) => Promise<Customer>;
   onNavigate: (tab: Tab) => void;
   nextInvoiceLabel: string;
   editInvoice?: InvoiceRecord | null;
@@ -1196,11 +1295,14 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
     if (editInvoice?.customerId) return customers.find((c) => c.id === editInvoice.customerId) || null;
     return null;
   });
+  const [customerSearch, setCustomerSearch] = useState("");
+  const [showAddCustomer, setShowAddCustomer] = useState(false);
   const [items, setItems] = useState<InvoiceItem[]>(() =>
     editInvoice?.items?.length ? editInvoice.items.map((i) => ({ ...i })) : [{ productId: 0, name: "", qty: 1, price: 0, gstRate: Number(settings.defaultGst) }]
   );
   const [invoiceSize, setInvoiceSize] = useState<"a4" | "a5" | "thermal">("a4");
   const [paymentStatus, setPaymentStatus] = useState<"paid" | "partial" | "unpaid">(editInvoice?.status || "paid");
+  const [paymentMethod, setPaymentMethod] = useState(editInvoice?.paymentMethod || "Cash");
   const [paidAmount, setPaidAmount] = useState<number>(editInvoice?.paidAmount || 0);
   const [saved, setSaved] = useState(false);
   const [scanCode, setScanCode] = useState("");
@@ -1318,6 +1420,7 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
       customerEmail: selectedCustomer?.email || "",
       customerAddress: selectedCustomer?.address || "",
       customerGst: selectedCustomer?.gst || "",
+      paymentMethod,
       total: grandTotal,
       subtotal,
       totalGst: invoiceKind === "tax" ? totalGst : 0,
@@ -1531,6 +1634,7 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
           <section class="party-card">
             <div class="eyebrow">Payment</div>
             <h2>${esc(statusLabel)}</h2>
+            <p>Payment method: ${esc(paymentMethod)}</p>
             <p>Subtotal: ${esc(fmt(subtotal))}</p>
             ${invoiceKind === "tax" ? `<p>GST collected: ${esc(fmt(totalGst))}</p>` : ""}
             <p>Due: ${esc(fmt(dueAmount))}</p>
@@ -1730,7 +1834,10 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
           <div className="bg-card rounded-xl p-5 border border-border shadow-sm space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-foreground">{isEditMode ? "Edit Invoice" : "Invoice Details"}</h3>
-              <span className="text-xs font-[DM_Mono] text-muted-foreground bg-muted px-2 py-1 rounded-md">{invoiceNo}</span>
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={() => onNavigate("invoices")} className="rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">View Invoices</button>
+                <span className="text-xs font-[DM_Mono] text-muted-foreground bg-muted px-2 py-1 rounded-md">{invoiceNo}</span>
+              </div>
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div>
@@ -1744,15 +1851,26 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
             </div>
             <div>
               <label className="block text-xs font-medium text-muted-foreground mb-1">Bill To</label>
-              {customers.length > 0 ? (
-                <select onChange={(e) => setSelectedCustomer(customers.find((c) => c.id === +e.target.value) || null)}
-                  className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30">
-                  <option value="">Select Customer...</option>
-                  {customers.map((c) => <option key={c.id} value={c.id}>{c.name}{c.phone ? ` — ${c.phone}` : ""}</option>)}
-                </select>
-              ) : (
-                <div className="p-3 bg-muted/50 rounded-lg text-xs text-muted-foreground">No customers added yet. Add a customer first.</div>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <input value={customerSearch} onChange={(e) => { setCustomerSearch(e.target.value); setSelectedCustomer(null); }} placeholder={selectedCustomer ? `${selectedCustomer.name} — ${selectedCustomer.phone}` : "Search existing customers by name or mobile"} className="min-w-0 flex-1 px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                <button type="button" onClick={() => setShowAddCustomer((visible) => !visible)} className="inline-flex items-center justify-center gap-1 rounded-lg border border-primary/30 px-3 py-2 text-sm text-primary hover:bg-primary/5"><Plus className="h-4 w-4" /> Add New Customer</button>
+                {selectedCustomer && <button type="button" onClick={() => setSelectedCustomer(null)} className="rounded-lg border border-border px-3 py-2 text-sm">Walk-in</button>}
+              </div>
+              {customerSearch.trim() && (
+                <div className="mt-1 max-h-40 overflow-auto rounded-lg border border-border bg-card">
+                  {customers.filter((c) => `${c.name} ${c.phone}`.toLowerCase().includes(customerSearch.toLowerCase())).map((c) => (
+                    <button type="button" key={c.id} onClick={() => { setSelectedCustomer(c); setCustomerSearch(""); }} className="block w-full px-3 py-2 text-left text-sm hover:bg-muted">{c.name}{c.phone ? ` — ${c.phone}` : ""}</button>
+                  ))}
+                  {!customers.some((c) => `${c.name} ${c.phone}`.toLowerCase().includes(customerSearch.toLowerCase())) && <p className="px-3 py-2 text-xs text-muted-foreground">No matching customers.</p>}
+                </div>
               )}
+              {showAddCustomer && <InlineCustomerForm onCreate={async (customer) => {
+                const created = await onAddCustomer(customer);
+                setSelectedCustomer(created);
+                setCustomerSearch("");
+                setShowAddCustomer(false);
+                return created;
+              }} onCancel={() => setShowAddCustomer(false)} />}
               {selectedCustomer && (
                 <div className="mt-2 p-3 bg-secondary/50 rounded-lg text-xs text-muted-foreground space-y-0.5">
                   <p><MapPin className="w-3 h-3 inline mr-1" />{selectedCustomer.address}</p>
@@ -1925,6 +2043,14 @@ function InvoiceView({ products, customers, profile, settings, onSave, onNavigat
               </label>
             ))}
           </div>
+          <div className="bg-card rounded-xl p-5 border border-border shadow-sm space-y-2">
+            <h3 className="font-semibold text-foreground mb-1">Payment Method</h3>
+            <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)} className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm">
+              {["Cash", "UPI", "Card", "Bank Transfer", "Closed PPI"].map((method) => <option key={method} value={method}>{method}</option>)}
+            </select>
+            <p className="text-xs text-muted-foreground">{paymentMethod === "Closed PPI" ? "Choose a customer with an active Closed PPI card and sufficient balance." : "Recorded with this invoice for payment history and reports."}</p>
+          </div>
+
           <div className="bg-card rounded-xl p-5 border border-border shadow-sm space-y-2">
             <h3 className="font-semibold text-foreground mb-1">Payment Status</h3>
             {(["paid", "partial", "unpaid"] as const).map((status) => (
@@ -2379,9 +2505,10 @@ function InvoicesView({ invoices, onDelete, onNavigateInvoice, onEditInvoice, pr
 
 // ─── Barcode ──────────────────────────────────────────────────────────────────
 // ─── Cash Sale POS Billing ─────────────────────────────────────────────────────
-function CashSaleView({ products, customers, profile, settings, onSave, onProcessReturn, invoices, returns, devices, gstRegistration, gstRegistrationLoading, shopId, shopOwnerUid }: {
+function CashSaleView({ products, customers, profile, settings, onSave, onAddCustomer, onProcessReturn, invoices, returns, devices, gstRegistration, gstRegistrationLoading, shopId, shopOwnerUid }: {
   products: Product[]; customers: Customer[]; profile: Profile; settings: AppSettings;
   onSave: (inv: InvoiceRecord) => Promise<boolean> | boolean;
+  onAddCustomer: (customer: Pick<Customer, "name" | "phone" | "email" | "address" | "gst">) => Promise<Customer>;
   onProcessReturn: (record: CashSaleReturnRecord) => Promise<void>;
   invoices: InvoiceRecord[];
   returns: CashSaleReturnRecord[];
@@ -2399,6 +2526,9 @@ function CashSaleView({ products, customers, profile, settings, onSave, onProces
 
   const [rows, setRows] = useState<POSLineItem[]>(() => [makeEmptyRow()]);
   const [customerName, setCustomerName] = useState("Walk-in Customer");
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
+  const [customerSearch, setCustomerSearch] = useState("");
+  const [showAddCustomer, setShowAddCustomer] = useState(false);
   const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().split("T")[0]);
   const allowedInvoiceTypes = getAllowedInvoiceTypes(gstRegistration);
   const [invoiceKind, setInvoiceKind] = useState<InvoiceKind>(allowedInvoiceTypes[0] || "regular");
@@ -2407,7 +2537,7 @@ function CashSaleView({ products, customers, profile, settings, onSave, onProces
     if (!allowedInvoiceTypes.includes(invoiceKind)) setInvoiceKind(allowedInvoiceTypes[0] || "regular");
   }, [gstRegistration, invoiceKind, allowedInvoiceTypes]);
 
-  const [paymentMode, setPaymentMode] = useState<"cash" | "upi" | "card" | "posdevice" | "mixed">("cash");
+  const [paymentMode, setPaymentMode] = useState<"cash" | "upi" | "card" | "posdevice" | "mixed" | "ppi">("cash");
   const [amountReceived, setAmountReceived] = useState<string>("");
   const [txnRef, setTxnRef] = useState("");
   const [mixedSplits, setMixedSplits] = useState<{ mode: string; amount: string }[]>([
@@ -2589,7 +2719,7 @@ function CashSaleView({ products, customers, profile, settings, onSave, onProces
   const roundOff = roundedTotal - rawTotal;
   const grandTotal = roundedTotal;
 
-  const received = Number(amountReceived) || 0;
+  const received = paymentMode === "ppi" ? grandTotal : Number(amountReceived) || 0;
   const balance = Math.max(0, grandTotal - received);
   const changeToReturn = Math.max(0, received - grandTotal);
 
@@ -2599,6 +2729,8 @@ function CashSaleView({ products, customers, profile, settings, onSave, onProces
   const resetBilling = () => {
     setRows([makeEmptyRow()]);
     setCustomerName("Walk-in Customer");
+    setSelectedCustomer(null);
+    setCustomerSearch("");
     setAmountReceived("");
     setTxnRef("");
     setPaymentMode("cash");
@@ -2694,6 +2826,11 @@ function CashSaleView({ products, customers, profile, settings, onSave, onProces
       id: formatCashSaleId(invoiceDate),
       date: invoiceDate,
       customerName: customerName.trim() || "Walk-in Customer",
+      customerId: selectedCustomer?.id,
+      customerPhone: selectedCustomer?.phone || "",
+      customerEmail: selectedCustomer?.email || "",
+      customerAddress: selectedCustomer?.address || "",
+      customerGst: selectedCustomer?.gst || "",
       total: grandTotal,
       subtotal,
       totalGst: taxAmount,
@@ -2708,7 +2845,7 @@ function CashSaleView({ products, customers, profile, settings, onSave, onProces
       source: "pos",
       items,
       paymentMode,
-      paymentMethod: paymentMode === "posdevice" ? (selectedDevice ? PROVIDER_META[selectedDevice.provider].label : "POS Device") : paymentMode.toUpperCase(),
+      paymentMethod: paymentMode === "ppi" ? "Closed PPI" : paymentMode === "posdevice" ? (selectedDevice ? PROVIDER_META[selectedDevice.provider].label : "POS Device") : paymentMode.toUpperCase(),
       amountReceived: received,
       changeReturned: changeToReturn,
       txnRef: paymentMode === "posdevice" ? posTxnId : txnRef,
@@ -2827,9 +2964,19 @@ function CashSaleView({ products, customers, profile, settings, onSave, onProces
   return (
     <div className="flex flex-col h-full -m-4 lg:-m-6">
       {/* Top bar */}
-      <div className="flex items-center gap-3 px-4 py-2.5 bg-card border-b border-border shrink-0">
-        <input value={customerName} onChange={(e) => setCustomerName(e.target.value)} placeholder="Walk-in Customer"
-          className="px-3 py-1.5 bg-background border border-border rounded-lg text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/30 w-48" />
+      <div className="flex flex-wrap items-center gap-3 px-4 py-2.5 bg-card border-b border-border shrink-0">
+        <div className="relative flex min-w-0 items-center gap-1">
+          <input value={customerSearch} onChange={(e) => { setCustomerSearch(e.target.value); setCustomerName(e.target.value || "Walk-in Customer"); setSelectedCustomer(null); }} placeholder={selectedCustomer?.name || "Walk-in Customer / Search customer"}
+            className="w-40 px-3 py-1.5 bg-background border border-border rounded-lg text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/30 sm:w-48" />
+          {customerSearch.trim() && customers.some((customer) => `${customer.name} ${customer.phone}`.toLowerCase().includes(customerSearch.toLowerCase())) && (
+            <div className="absolute left-0 top-full z-30 mt-1 max-h-48 w-64 overflow-auto rounded-lg border border-border bg-card shadow-lg">
+              {customers.filter((customer) => `${customer.name} ${customer.phone}`.toLowerCase().includes(customerSearch.toLowerCase())).map((customer) => (
+                <button type="button" key={customer.id} onClick={() => { setSelectedCustomer(customer); setCustomerName(customer.name); setCustomerSearch(""); }} className="block w-full px-3 py-2 text-left text-sm hover:bg-muted">{customer.name}{customer.phone ? ` — ${customer.phone}` : ""}</button>
+              ))}
+            </div>
+          )}
+          <button type="button" onClick={() => setShowAddCustomer((visible) => !visible)} aria-label="Add new customer" title="Add new customer" className="inline-flex h-8 shrink-0 items-center justify-center gap-1 rounded-lg border border-primary/30 px-2 text-xs text-primary hover:bg-primary/5"><Plus className="h-4 w-4" /><span>Add Customer</span></button>
+        </div>
         <div className="flex items-center gap-2">
           <label className="text-xs text-muted-foreground">Date</label>
           <input type="date" value={invoiceDate} onChange={(e) => setInvoiceDate(e.target.value)}
@@ -2876,6 +3023,19 @@ function CashSaleView({ products, customers, profile, settings, onSave, onProces
           <button onClick={handleCancel} className="text-xs px-3 py-1.5 border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors">Cancel</button>
         </div>
       </div>
+
+      {showAddCustomer && (
+        <div className="border-b border-border bg-card px-4 py-3">
+          <InlineCustomerForm onCreate={async (customer) => {
+            const created = await onAddCustomer(customer);
+            setSelectedCustomer(created);
+            setCustomerName(created.name);
+            setCustomerSearch("");
+            setShowAddCustomer(false);
+            return created;
+          }} onCancel={() => setShowAddCustomer(false)} />
+        </div>
+      )}
 
       {showReturnDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" aria-labelledby="cash-sale-return-title">
@@ -3093,9 +3253,9 @@ function CashSaleView({ products, customers, profile, settings, onSave, onProces
 
         {/* Payment panel */}
         <div className="p-3 space-y-2 border-t lg:border-t-0 border-border">
-          <div className="flex gap-1.5">
+          <div className="grid grid-cols-3 gap-1.5">
             {([
-              ["cash", "Cash"], ["upi", "UPI"], ["card", "Card"], ["posdevice", "POS Device"], ["mixed", "Mixed"],
+              ["cash", "Cash"], ["upi", "UPI"], ["card", "Card"], ["posdevice", "POS Device"], ["mixed", "Mixed"], ["ppi", "Closed PPI"],
             ] as const).map(([m, label]) => (
               <button key={m} onClick={() => setPaymentMode(m)}
                 className={`flex-1 py-1.5 rounded-lg text-[10px] font-semibold uppercase transition-all border ${paymentMode === m ? "bg-primary text-primary-foreground border-primary" : "border-border text-muted-foreground hover:border-primary/40"}`}>
@@ -3103,6 +3263,10 @@ function CashSaleView({ products, customers, profile, settings, onSave, onProces
               </button>
             ))}
           </div>
+
+          {paymentMode === "ppi" && !selectedCustomer && (
+            <p role="alert" className="text-xs text-amber-700">Select or add a customer with a Closed PPI card before completing this sale.</p>
+          )}
 
           {paymentMode === "mixed" ? (
             <div className="space-y-1.5">
@@ -3153,7 +3317,7 @@ function CashSaleView({ products, customers, profile, settings, onSave, onProces
             <div className="grid grid-cols-2 gap-1.5">
               <div>
                 <label className="text-[10px] text-muted-foreground">Amount Received</label>
-                <input type="number" value={amountReceived} onChange={(e) => setAmountReceived(e.target.value)}
+                <input type="number" value={paymentMode === "ppi" ? grandTotal : amountReceived} disabled={paymentMode === "ppi"} onChange={(e) => setAmountReceived(e.target.value)}
                   className="w-full px-2 py-1.5 bg-background border border-border rounded-lg text-xs font-[DM_Mono]" />
               </div>
               <div>
@@ -3162,7 +3326,7 @@ function CashSaleView({ products, customers, profile, settings, onSave, onProces
                   {fmt(changeToReturn > 0 ? changeToReturn : balance)}
                 </p>
               </div>
-              {paymentMode !== "cash" && (
+              {paymentMode !== "cash" && paymentMode !== "ppi" && (
                 <input value={txnRef} onChange={(e) => setTxnRef(e.target.value)} placeholder="Transaction reference no."
                   className="col-span-2 px-2.5 py-1.5 bg-background border border-border rounded-lg text-xs" />
               )}
@@ -4492,14 +4656,38 @@ function buildBarcodeSvgMarkup(value: string, format: BarcodeFormat = detectBarc
       svg.setAttribute('height', '100%');
     }
   } catch {
-    const fallback = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    fallback.setAttribute('x', '110');
-    fallback.setAttribute('y', '50');
-    fallback.setAttribute('text-anchor', 'middle');
-    fallback.setAttribute('font-size', '12');
-    fallback.setAttribute('font-family', 'DM Mono,monospace');
-    fallback.textContent = clean;
-    svg.appendChild(fallback);
+    try {
+      JsBarcode(svg, clean, {
+        format: 'CODE128',
+        displayValue,
+        background: '#ffffff',
+        lineColor: '#0f172a',
+        width: 1.8,
+        height: 48,
+        margin: 8,
+        fontSize: 12,
+        textMargin: 6,
+        flat: true,
+        font: 'DM Mono, monospace',
+      });
+      const width = Number.parseFloat(svg.getAttribute('width') || '0');
+      const height = Number.parseFloat(svg.getAttribute('height') || '0');
+      if (width > 0 && height > 0) {
+        svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+        svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+        svg.setAttribute('width', '100%');
+        svg.setAttribute('height', '100%');
+      }
+    } catch {
+      const fallback = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      fallback.setAttribute('x', '110');
+      fallback.setAttribute('y', '50');
+      fallback.setAttribute('text-anchor', 'middle');
+      fallback.setAttribute('font-size', '12');
+      fallback.setAttribute('font-family', 'DM Mono,monospace');
+      fallback.textContent = clean;
+      svg.appendChild(fallback);
+    }
   }
 
   return svg.outerHTML;
@@ -4534,22 +4722,6 @@ function buildPrintDocument({
     ? buildA4LayoutConfig(layoutPreset, customColumns, customRows)
     : { columns: 1, rows: 1, labelCount: 1, description: 'Thermal roll' };
 
-  const labelMarkup = items.map((item) => {
-    const barcodeMarkup = buildBarcodeSvgMarkup(item.code, item.format, false);
-    const skuText = item.sku ? `<span class="label-sku">SKU: ${escapeHtml(item.sku)}</span>` : '';
-    const priceText = item.price && item.price !== '0' ? `<span class="label-price">₹${escapeHtml(item.price)}</span>` : '';
-    return `
-      <div class="label-card">
-        <div class="label-name">${escapeHtml(item.name)}</div>
-        ${barcodeMarkup}
-        <div class="label-human-code">${escapeHtml(item.code)}</div>
-        <div class="label-meta">
-          ${skuText}
-          ${priceText}
-        </div>
-      </div>`;
-  }).join('');
-
   const exactForty = mode === 'a4' && layoutPreset === '40';
   const layoutColumns = mode === 'a4' ? resolvedLayout.columns : 1;
   const labelHeight = mode === 'a4' ? '42mm' : `${thermalHeightMm}mm`;
@@ -4566,7 +4738,12 @@ function buildPrintDocument({
         while (pageMarkup.length < resolvedLayout.labelCount) pageMarkup.push('<div class="label-card label-empty"></div>');
         return `<section class="print-sheet ${exactForty ? 'exact-40' : 'standard-sheet'}"><div class="print-grid">${pageMarkup.join('')}</div></section>`;
       }).join('')
-    : `<section class="print-sheet thermal-sheet"><div class="print-grid">${labelMarkup}</div></section>`;
+    : items.map((item) => {
+        const barcodeMarkup = buildBarcodeSvgMarkup(item.code, item.format, false);
+        const skuText = item.sku ? `<span class="label-sku">SKU: ${escapeHtml(item.sku)}</span>` : '';
+        const priceText = item.price && item.price !== '0' ? `<span class="label-price">₹${escapeHtml(item.price)}</span>` : '';
+        return `<section class="print-sheet thermal-sheet"><div class="print-grid"><div class="label-card"><div class="label-name">${escapeHtml(item.name)}</div>${barcodeMarkup}<div class="label-human-code">${escapeHtml(item.code)}</div><div class="label-meta">${skuText}${priceText}</div></div></div></section>`;
+      }).join('');
 
   return `<!doctype html>
 <html>
@@ -4738,10 +4915,10 @@ function BarcodeView({ products, setProducts }: { products: Product[]; setProduc
 
   const productPrintItems = selectedProducts.map((product) => ({
     name: product.name,
-    code: sanitizeBarcodeValue(product.barcode) || `SKU-${product.id}`,
+    code: resolveProductBarcode(product, products),
     price: String(product.price),
     sku: product.sku,
-    format: detectBarcodeFormat(product.barcode),
+    format: detectBarcodeFormat(resolveProductBarcode(product, products)),
     quantity: Math.max(1, productQuantities[product.id] ?? 1),
   }));
 
@@ -4775,7 +4952,13 @@ function BarcodeView({ products, setProducts }: { products: Product[]; setProduc
     const code = sanitizeBarcodeValue(raw);
     if (!code) return;
     const product = products.find((candidate) => sanitizeBarcodeValue(candidate.barcode) === code || sanitizeBarcodeValue(candidate.sku) === code) || null;
-    setManualBarcode(code);
+    const productBarcode = product ? resolveProductBarcode(product, products) : code;
+    if (product && !sanitizeBarcodeValue(product.barcode)) {
+      setProducts((current) => current.map((candidate) =>
+        candidate.id === product.id ? { ...candidate, barcode: productBarcode } : candidate,
+      ));
+    }
+    setManualBarcode(productBarcode);
     setManualLabel(product?.name || manualLabel || 'Product Name');
     setManualPrice(product ? String(product.price) : manualPrice);
     if (product) {
@@ -4787,11 +4970,22 @@ function BarcodeView({ products, setProducts }: { products: Product[]; setProduc
   useHardwareScanner(handleScan);
 
   const toggleSelectedProduct = (product: Product) => {
-    setSelectedProductIds((previous) => {
-      const alreadySelected = previous.includes(product.id);
-      return alreadySelected ? previous.filter((id) => id !== product.id) : [...previous, product.id];
-    });
+    const alreadySelected = selectedProductIds.includes(product.id);
+    setSelectedProductIds((previous) => alreadySelected
+      ? previous.filter((id) => id !== product.id)
+      : [...previous, product.id]);
     setProductQuantities((previous) => ({ ...previous, [product.id]: previous[product.id] ?? 1 }));
+    if (!alreadySelected) {
+      const barcode = resolveProductBarcode(product, products);
+      if (!sanitizeBarcodeValue(product.barcode)) {
+        setProducts((current) => current.map((candidate) =>
+          candidate.id === product.id ? { ...candidate, barcode } : candidate,
+        ));
+      }
+      setManualBarcode(barcode);
+      setManualLabel(product.name);
+      setManualPrice(String(product.price));
+    }
   };
 
   const updateSelectedQuantity = (productId: number, quantity: number) => {
@@ -4806,8 +5000,13 @@ function BarcodeView({ products, setProducts }: { products: Product[]; setProduc
       window.alert('Select at least one product or enter a barcode value.');
       return;
     }
+    const invalidItem = printItems.find((item) => !isValidBarcodeValue(item.code, item.format));
+    if (invalidItem) {
+      window.alert(`Barcode "${invalidItem.code}" is invalid for ${invalidItem.format}. Correct the product barcode before printing.`);
+      return;
+    }
 
-    const win = window.open('', '_blank', 'noopener,noreferrer');
+    const win = window.open('', '_blank');
     if (!win) {
       window.alert('Your browser blocked the print preview. Please allow pop-ups and try again.');
       return;
@@ -4832,8 +5031,9 @@ function BarcodeView({ products, setProducts }: { products: Product[]; setProduc
       calibrationYmm,
       printBoundaries,
     }));
+    win.opener = null;
     win.document.close();
-    setTimeout(() => win.print(), 250);
+    setTimeout(() => { if (!win.closed) win.print(); }, 500);
   };
 
   const handleQuickAdd = () => {
@@ -4863,6 +5063,7 @@ function BarcodeView({ products, setProducts }: { products: Product[]; setProduc
       stock: Number(quickAddForm.stock) || 0,
       unit: quickAddForm.unit.trim() || 'Packet',
       category: quickAddForm.category.trim() || 'General',
+      isPublishedToMarketplace: true,
     };
 
     setProducts((current) => [...current, product]);
@@ -5286,9 +5487,10 @@ function GSTView({ profile }: { profile: Profile }) {
 }
 
 // ─── Customers ────────────────────────────────────────────────────────────────
-function CustomersView({ customers, setCustomers, profile, marketplaceCustomers, shopId, marketplaceRecordsError, openAddForm = false, onQuickActionHandled }: {
+function CustomersView({ customers, setCustomers, onAddCustomer, profile, marketplaceCustomers, shopId, marketplaceRecordsError, openAddForm = false, onQuickActionHandled }: {
   customers: Customer[];
   setCustomers: (v: Customer[] | ((p: Customer[]) => Customer[])) => void;
+  onAddCustomer: (customer: Pick<Customer, "name" | "phone" | "email" | "address" | "gst">) => Promise<Customer>;
   profile: Profile;
   marketplaceCustomers: MarketplaceCustomerRecord[];
   shopId: string;
@@ -5367,14 +5569,8 @@ function CustomersView({ customers, setCustomers, profile, marketplaceCustomers,
 
   const handleAdd = async () => {
     if (!form.name) return;
-    const previousCustomers = customers;
     try {
-      await assertCloudSyncAvailable();
-      setCustomers([...customers, { id: Date.now(), name: form.name, phone: form.phone, email: form.email, address: form.address, gst: form.gst, totalSpent: 0, lastPurchase: "-" }]);
-      if (!(await flushPending())) {
-        setCustomers(previousCustomers);
-        throw new Error("Cloud sync did not confirm the customer change. Reconnect and try again.");
-      }
+      await onAddCustomer(form);
       setCustomerWriteError(null);
       setForm({ name: "", phone: "", email: "", address: "", gst: "" });
       setShowAdd(false);
@@ -6507,7 +6703,7 @@ const TITLES: Record<Tab, string> = {
   reminders: "Reminders",
   rates: "Party Rates", bulk: "Bulk Update",
   backup: "Data Backup", reports: "Reports", sync: "Data Sync Status",
-  barcode: "Inventory (Barcode & Labels)", ppi: "Closed PPI Management", gst: "GST / ITR Filing",
+  barcode: "Barcode Generator", ppi: "Closed PPI Management", gst: "GST / ITR Filing",
   customers: "Customers", settings: "Settings", profile: "My Profile",
 };
 
@@ -6554,6 +6750,7 @@ function BillingApp({
   const [marketplaceCustomers, setMarketplaceCustomers] = useState<MarketplaceCustomerRecord[]>([]);
   const [marketplaceInvoicesError, setMarketplaceInvoicesError] = useState<string | null>(null);
   const [marketplaceCustomersError, setMarketplaceCustomersError] = useState<string | null>(null);
+  const [marketplaceProductSyncError, setMarketplaceProductSyncError] = useState<string | null>(null);
   const [reminders, setReminders] = useLocalStorage<Reminder[]>(scoped("reminders"), []);
   const [partyRates, setPartyRates] = useLocalStorage<PartyRate[]>(scoped("party_rates"), []);
   const [backups, setBackups] = useLocalStorage<BackupRecord[]>(scoped("backups"), []);
@@ -6631,9 +6828,103 @@ function BillingApp({
   }, [firebaseUser?.shopId]);
 
   useEffect(() => {
-    if (!activeAccount || !profile.email) return;
+    const shopId = firebaseUser?.shopId;
+    if (!shopId) return;
+    let previousRemoteProducts = new Map<string, { externalBillPilotItemId?: string; barcode?: string; name: string }>();
+    return subscribeToShopProducts(
+      shopId,
+      (_listings, firestoreProducts) => {
+        const remoteIds = new Set(firestoreProducts.map((remote) => remote.id));
+        const removedRemoteProducts = [...previousRemoteProducts]
+          .filter(([remoteId]) => !remoteIds.has(remoteId))
+          .map(([, remote]) => remote);
+        previousRemoteProducts = new Map(firestoreProducts.map((remote) => [remote.id, {
+          externalBillPilotItemId: remote.externalBillPilotItemId,
+          barcode: remote.barcode,
+          name: remote.name,
+        }]));
+        setProducts((current) => {
+          let changed = false;
+          const next = [...current];
+          const idPrefix = `bp_${encodeURIComponent(shopId)}_`;
+          firestoreProducts.forEach((remote, index) => {
+            const stableIdPart = remote.id.startsWith(idPrefix)
+              ? Number(decodeURIComponent(remote.id.slice(idPrefix.length)))
+              : NaN;
+            const externalId = remote.externalBillPilotItemId?.trim();
+            const matches = next.map((product, productIndex) => ({ product, productIndex })).filter(({ product }) =>
+              (Number.isFinite(stableIdPart) && product.id === stableIdPart) ||
+              Boolean(externalId && product.sku.trim().toLowerCase() === externalId.toLowerCase()) ||
+              Boolean(remote.barcode && product.barcode === remote.barcode)
+            );
+            const nameMatches = next.map((product, productIndex) => ({ product, productIndex })).filter(({ product }) =>
+              product.name.trim().toLowerCase() === remote.name.trim().toLowerCase()
+            );
+            if (matches.length > 1 || (matches.length === 0 && nameMatches.length > 1)) return;
+            const existingIndex = matches.length === 1
+              ? matches[0].productIndex
+              : matches.length === 0 && nameMatches.length === 1
+                ? nameMatches[0].productIndex
+                : -1;
+            const existing = existingIndex >= 0 ? next[existingIndex] : undefined;
+            const productId = existing?.id ?? (Number.isFinite(stableIdPart) ? stableIdPart : Date.now() + index);
+            const synced: Product = {
+              ...(existing || {
+                id: productId,
+                sku: externalId || "",
+                barcode: remote.barcode || "",
+                costPrice: 0,
+              }),
+              id: productId,
+              name: remote.name,
+              sku: externalId || existing?.sku || "",
+              barcode: remote.barcode || existing?.barcode || "",
+              price: remote.shopPrice / 100,
+              stock: remote.stockQuantity,
+              unit: remote.unit,
+              category: remote.category,
+              brand: remote.brand,
+              gstRate: remote.standardGSTRate,
+              description: remote.description,
+              imageUrl: remote.imageUrl,
+              isPublishedToMarketplace: remote.isVisible,
+            };
+            if (existingIndex < 0) {
+              next.push(synced);
+              changed = true;
+            } else if (JSON.stringify(next[existingIndex]) !== JSON.stringify(synced)) {
+              next[existingIndex] = synced;
+              changed = true;
+            }
+          });
+          removedRemoteProducts.forEach((remote) => {
+            const matches = next.filter((product) =>
+              Boolean(remote.externalBillPilotItemId && product.sku.trim().toLowerCase() === remote.externalBillPilotItemId.toLowerCase()) ||
+              Boolean(remote.barcode && product.barcode === remote.barcode) ||
+              product.name.trim().toLowerCase() === remote.name.trim().toLowerCase()
+            );
+            if (matches.length !== 1) return;
+            const matched = matches[0];
+            const index = next.findIndex((product) => product.id === matched.id);
+            if (index >= 0 && matched.isPublishedToMarketplace !== false) {
+              next[index] = { ...matched, isPublishedToMarketplace: false };
+              changed = true;
+            }
+          });
+          return changed ? next : current;
+        });
+      },
+      (error) => console.error(`Could not sync NearBasket products for shop ${shopId}:`, error)
+    );
+  // setProducts uses a functional update, so the listener does not need to be recreated for each render.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeAccount?.id, firebaseUser?.shopId]);
+
+  useEffect(() => {
+    if ((!activeAccount && !firebaseUser?.shopId) || (!profile.email && !firebaseUser?.shopId)) return;
 
     const shop =
+      (firebaseUser?.shopId ? dbStore.getShopById(firebaseUser.shopId) : undefined) ||
       dbStore.getShops().find((candidate) => normalizeEmail(candidate.email) === normalizeEmail(profile.email)) ||
       dbStore.getShopById(profile.businessId);
     if (!shop) return;
@@ -6644,7 +6935,6 @@ function BillingApp({
     const signatures = new Map<number, string>();
 
     products.forEach((product) => {
-      if (product.isPublishedToMarketplace === false) return;
       const externalId = product.sku?.trim() || product.barcode?.trim() || String(product.id);
       const stableListingId = `bp_${encodeURIComponent(shop.id)}_${encodeURIComponent(String(product.id))}`;
       const listings = dbStore.getListings(shop.id);
@@ -6677,6 +6967,7 @@ function BillingApp({
         stockQuantity,
         standardGSTRate: product.gstRate,
         externalBillPilotItemId: externalId,
+        isVisible: product.isPublishedToMarketplace !== false,
       };
       const signature = JSON.stringify({ product: syncedProduct, listingId: existingListing?.id || null });
       signatures.set(product.id, signature);
@@ -6696,6 +6987,7 @@ function BillingApp({
             unit: result.listing.product.unit,
             description: result.listing.product.description,
             imageUrl: result.listing.product.imageUrl,
+            barcode: result.listing.product.barcode,
             shopPricePaise: result.listing.shopPrice,
             salePricePaise: result.listing.salePrice,
             stockQuantity: result.listing.stockQuantity,
@@ -6703,14 +6995,19 @@ function BillingApp({
             isVisible: result.listing.isVisible,
             externalBillPilotItemId: result.listing.externalBillPilotItemId,
           });
+          if (syncedMarketplaceProducts.current.shopId === shop.id) setMarketplaceProductSyncError(null);
         } catch (error: unknown) {
           console.error(`NearBasket sync failed for product ${product.id}:`, error);
+          if (syncedMarketplaceProducts.current.shopId === shop.id) {
+            syncedMarketplaceProducts.current.signatures.delete(product.id);
+            setMarketplaceProductSyncError(error instanceof Error ? error.message : String(error));
+          }
         }
       })();
     });
 
     syncedMarketplaceProducts.current = { shopId: shop.id, signatures };
-  }, [activeAccount?.id, assertCloudSyncAvailable, marketplaceStoreVersion, products, profile.businessId, profile.email]);
+  }, [activeAccount?.id, assertCloudSyncAvailable, firebaseUser?.shopId, marketplaceProductSyncError, marketplaceStoreVersion, products, profile.businessId, profile.email]);
 
   // ── Local-only auth (no server needed) ──────────────────────────────────────
   const LOCAL_AUTH_KEY = "billpilot_local_account";
@@ -6893,6 +7190,43 @@ function BillingApp({
   const nextInvoiceNumber = invoices.reduce((max, inv) => Math.max(max, parseInvoiceCounter(inv.id)), 0) + 1;
   const nextInvoiceLabel = formatInvoiceNo(nextInvoiceNumber);
 
+  const addCustomer = async (input: Pick<Customer, "name" | "phone" | "email" | "address" | "gst">): Promise<Customer> => {
+    const digits = input.phone.replace(/\D/g, "");
+    const mobileDigits = digits.startsWith("91") && digits.length === 12 ? digits.slice(2) : digits;
+    if (!input.name.trim()) throw new Error("Enter the customer's name.");
+    if (digits && !/^[6-9]\d{9}$/.test(mobileDigits)) throw new Error("Enter a valid 10-digit Indian mobile number.");
+    const normalizedPhone = normalizeMobile(input.phone);
+    const existing = normalizedPhone
+      ? customers.find((customer) => normalizeMobile(customer.phone) === normalizedPhone)
+      : undefined;
+    if (existing) {
+      window.alert(`A customer with mobile number ${existing.phone} already exists. The existing customer will be selected.`);
+      return existing;
+    }
+
+    await assertCloudSyncAvailable();
+    const previousCustomers = customers;
+    let id = Date.now();
+    while (previousCustomers.some((customer) => customer.id === id)) id += 1;
+    const customer: Customer = {
+      ...input,
+      id,
+      name: input.name.trim(),
+      phone: input.phone.trim(),
+      email: input.email.trim(),
+      address: input.address.trim(),
+      gst: input.gst.trim(),
+      totalSpent: 0,
+      lastPurchase: "-",
+    };
+    setCustomers([...previousCustomers, customer]);
+    if (!(await flushPending())) {
+      setCustomers(previousCustomers);
+      throw new Error("Cloud sync did not confirm the customer change. Reconnect and try again.");
+    }
+    return customer;
+  };
+
   const saveInvoice = async (inv: InvoiceRecord): Promise<boolean> => {
     if (invoiceSaveInProgress.current) {
       alert("An invoice submission is already in progress. Wait for it to finish before submitting again.");
@@ -6952,6 +7286,85 @@ function BillingApp({
       invoiceSaveInProgress.current = false;
       return false;
     }
+    const previousInvoice = invoices.find((previous) => previous.id === invoiceToSave.id);
+    const previousPpiAmount = previousInvoice?.paymentMethod === "Closed PPI"
+      ? roundMoney(Math.max(0, Math.min(previousInvoice.total, previousInvoice.paidAmount ?? (previousInvoice.status === "paid" ? previousInvoice.total : 0))))
+      : 0;
+    const nextPpiAmount = invoiceToSave.paymentMethod === "Closed PPI"
+      ? roundMoney(Math.max(0, Math.min(invoiceToSave.total, invoiceToSave.paidAmount ?? (invoiceToSave.status === "paid" ? invoiceToSave.total : 0))))
+      : 0;
+    let nextPpiCards = ppiCards;
+    const updatePpiWallet = (
+      phone: string | undefined,
+      delta: number,
+      type: PPITransaction["type"]
+    ): string | null => {
+      if (!delta) return null;
+      const mobile = normalizeMobile(phone || "");
+      if (!mobile) return "A valid customer mobile number is required for Closed PPI payments.";
+      const matchingCards = nextPpiCards.filter((card) => normalizeMobile(card.mobile) === mobile);
+      if (matchingCards.length !== 1) return matchingCards.length ? "Multiple Closed PPI cards use this mobile number. Resolve the duplicate cards before charging." : "No Closed PPI card is registered for this customer's mobile number.";
+      const card = matchingCards[0];
+      if (type === "debit" && (card.status !== "active" || card.expiryDate < new Date().toISOString().slice(0, 10))) {
+        return "This Closed PPI card is blocked or expired.";
+      }
+      const amount = Math.abs(delta);
+      if (type === "debit" && card.balance < amount) return `Insufficient Closed PPI balance. Available: ${fmt(card.balance)}.`;
+      const balance = roundMoney(card.balance + (type === "credit" ? amount : -amount));
+      const transaction: PPITransaction = {
+        id: `ppi_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        date: invoiceToSave.date,
+        billNumber: invoiceToSave.id,
+        amount,
+        type,
+        remainingBalance: balance,
+        paymentMethod: "Closed PPI",
+        staffName: profile.ownerName || "Staff",
+      };
+      nextPpiCards = nextPpiCards.map((current) => current.id === card.id
+        ? { ...current, balance, transactions: [transaction, ...current.transactions] }
+        : current);
+      return null;
+    };
+
+    if (previousPpiAmount > 0 && nextPpiAmount > 0 &&
+        normalizeMobile(previousInvoice?.customerPhone || "") === normalizeMobile(invoiceToSave.customerPhone || "")) {
+      const delta = roundMoney(nextPpiAmount - previousPpiAmount);
+      const error = updatePpiWallet(invoiceToSave.customerPhone, delta, delta < 0 ? "credit" : "debit");
+      if (error) {
+        alert(error);
+        invoiceSaveInProgress.current = false;
+        return false;
+      }
+    } else {
+      if (previousPpiAmount > 0) {
+        const error = updatePpiWallet(previousInvoice?.customerPhone, previousPpiAmount, "credit");
+        if (error) {
+          alert(error);
+          invoiceSaveInProgress.current = false;
+          return false;
+        }
+      }
+      if (nextPpiAmount > 0) {
+        const error = updatePpiWallet(invoiceToSave.customerPhone, nextPpiAmount, "debit");
+        if (error) {
+          alert(error);
+          invoiceSaveInProgress.current = false;
+          return false;
+        }
+      }
+    }
+
+    const ppiChanged = nextPpiCards !== ppiCards;
+    if (ppiChanged) {
+      try {
+        await pushCloudValueNow(scoped("ppi_cards"), nextPpiCards);
+      } catch (error) {
+        alert(error instanceof Error ? error.message : "Closed PPI transaction could not be recorded. The invoice was not saved.");
+        invoiceSaveInProgress.current = false;
+        return false;
+      }
+    }
     const previousInvoices = invoices;
     const nextInvoices = previousInvoices.some((previous) => previous.id === inv.id)
       ? previousInvoices.map((previous) => previous.id === inv.id ? invoiceToSave : previous)
@@ -6959,10 +7372,19 @@ function BillingApp({
     try {
       await pushCloudValueNow(scoped("invoices"), nextInvoices);
     } catch (error) {
-      alert(error instanceof Error ? error.message : "Cloud sync did not confirm the invoice. It was not saved.");
+      let message = error instanceof Error ? error.message : "Cloud sync did not confirm the invoice. It was not saved.";
+      if (ppiChanged) {
+        try {
+          await pushCloudValueNow(scoped("ppi_cards"), ppiCards);
+        } catch (rollbackError) {
+          message += ` Closed PPI rollback also failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`;
+        }
+      }
+      alert(message);
       invoiceSaveInProgress.current = false;
       return false;
     }
+    if (ppiChanged) setPpiCards(nextPpiCards);
     setInvoices(nextInvoices);
     invoiceSaveInProgress.current = false;
     return true;
@@ -6970,13 +7392,51 @@ function BillingApp({
 
   const deleteInvoice = async (invoiceId: string) => {
     const previousInvoices = invoices;
+    const invoice = previousInvoices.find((record) => record.id === invoiceId);
+    const ppiAmount = invoice?.paymentMethod === "Closed PPI"
+      ? roundMoney(Math.max(0, Math.min(invoice.total, invoice.paidAmount ?? (invoice.status === "paid" ? invoice.total : 0))))
+      : 0;
+    let updatedPpiCards = ppiCards;
+    if (ppiAmount > 0) {
+      const mobile = normalizeMobile(invoice?.customerPhone || "");
+      const matchingCards = ppiCards.filter((card) => normalizeMobile(card.mobile) === mobile);
+      if (!mobile || matchingCards.length !== 1) {
+        alert("The invoice cannot be deleted because its Closed PPI wallet transaction cannot be reconciled to exactly one customer card.");
+        return;
+      }
+      const card = matchingCards[0];
+      const balance = roundMoney(card.balance + ppiAmount);
+      const transaction: PPITransaction = {
+        id: `ppi_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        date: new Date().toISOString().slice(0, 10),
+        billNumber: `VOID-${invoiceId}`,
+        amount: ppiAmount,
+        type: "credit",
+        remainingBalance: balance,
+        paymentMethod: "Closed PPI invoice reversal",
+        staffName: profile.ownerName || "Staff",
+      };
+      updatedPpiCards = ppiCards.map((current) => current.id === card.id
+        ? { ...current, balance, transactions: [transaction, ...current.transactions] }
+        : current);
+    }
     try {
       await assertCloudSyncAvailable();
       const nextInvoices = previousInvoices.filter((invoice) => invoice.id !== invoiceId);
+      if (updatedPpiCards !== ppiCards) await pushCloudValueNow(scoped("ppi_cards"), updatedPpiCards);
       await pushCloudValueNow(scoped("invoices"), nextInvoices);
+      if (updatedPpiCards !== ppiCards) setPpiCards(updatedPpiCards);
       setInvoices(nextInvoices);
     } catch (error) {
-      alert(error instanceof Error ? error.message : "Invoice could not be deleted.");
+      let message = error instanceof Error ? error.message : "Invoice could not be deleted.";
+      if (updatedPpiCards !== ppiCards) {
+        try {
+          await pushCloudValueNow(scoped("ppi_cards"), ppiCards);
+        } catch (rollbackError) {
+          message += ` Closed PPI rollback also failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`;
+        }
+      }
+      alert(message);
     }
   };
 
@@ -7084,7 +7544,7 @@ function BillingApp({
     switch (tab) {
       case "dashboard":  return <DashboardView products={products} customers={customers} demands={demands} invoices={invoices} nextInvoiceLabel={nextInvoiceLabel} reminders={reminders} onNavigate={handleDashboardQuickAction} onOpenMarketplaceOrder={(orderId)=>{setFocusedMarketplaceOrderId(orderId);handleNav('local_orders');}} marketplaceOrders={shopOrders} marketplaceShopId={localShop.id} marketplaceOrdersLoading={marketplaceOrdersLoading} marketplaceOrdersError={marketplaceOrdersError} />;
       case "demand":     return <DemandView demands={demands} setDemands={setDemands} customers={customers} />;
-      case "inventory":  return <InventoryView products={products} setProducts={setProducts} businessCategory={profile.category} storageKey={scoped("products")} openAddForm={pendingQuickAction === "product"} onQuickActionHandled={clearPendingQuickAction} />;
+      case "inventory":  return <InventoryView products={products} setProducts={setProducts} businessCategory={profile.category} storageKey={scoped("products")} shopId={localShop.id} openAddForm={pendingQuickAction === "product"} onQuickActionHandled={clearPendingQuickAction} onNavigate={handleNav} />;
       case "local_dashboard":
       case "local_orders":
         return (
@@ -7098,16 +7558,16 @@ function BillingApp({
         );
       case "local_products":
         return <ShopInventory listings={shopListings} shopId={localShop.id} onRefresh={() => setMarketplaceStoreVersion((version) => version + 1)} />;
-      case "invoice":    return <InvoiceView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} onNavigate={handleNav} nextInvoiceLabel={nextInvoiceLabel} editInvoice={editingInvoice} onDoneEditing={() => { setEditingInvoiceId(null); handleNav("invoices"); }} partyRates={partyRates} gstRegistration={gstRegistration} gstRegistrationLoading={gstRegistrationLoading} shopId={firebaseUser?.shopId} shopOwnerUid={firebaseUser?.id} />;
+      case "invoice":    return <InvoiceView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} onAddCustomer={addCustomer} onNavigate={handleNav} nextInvoiceLabel={nextInvoiceLabel} editInvoice={editingInvoice} onDoneEditing={() => { setEditingInvoiceId(null); handleNav("invoices"); }} partyRates={partyRates} gstRegistration={gstRegistration} gstRegistrationLoading={gstRegistrationLoading} shopId={firebaseUser?.shopId} shopOwnerUid={firebaseUser?.id} />;
       case "invoices":   return <InvoicesView invoices={combinedInvoices} onDelete={(id) => void deleteInvoice(id)} onNavigateInvoice={() => { setEditingInvoiceId(null); handleNav("invoice"); }} onEditInvoice={(id) => { setEditingInvoiceId(id); handleNav("invoice"); }} profile={profile} marketplaceRecordsError={marketplaceInvoicesError} />;
-      case "cashsale":   return <CashSaleView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} onProcessReturn={processCashSaleReturn} invoices={invoices} returns={cashSaleReturns} devices={paymentDevices} gstRegistration={gstRegistration} gstRegistrationLoading={gstRegistrationLoading} shopId={firebaseUser?.shopId} shopOwnerUid={firebaseUser?.id} />;
+      case "cashsale":   return <CashSaleView products={products} customers={customers} profile={profile} settings={settings} onSave={saveInvoice} onAddCustomer={addCustomer} onProcessReturn={processCashSaleReturn} invoices={invoices} returns={cashSaleReturns} devices={paymentDevices} gstRegistration={gstRegistration} gstRegistrationLoading={gstRegistrationLoading} shopId={firebaseUser?.shopId} shopOwnerUid={firebaseUser?.id} />;
       case "posdevices": return <PaymentDevicesView devices={paymentDevices} setDevices={setPaymentDevices} invoices={invoices} />;
       case "barcode":    return <BarcodeView products={products} setProducts={setProducts} />;
       case "regular_demands": return <RegularDemandsView demands={regularDemands} setDemands={setRegularDemands} products={products} setProducts={setProducts} actor={sessionUser?.username || sessionUser?.email || "Shopkeeper"} />;
       case "whatsapp_reports": return <WhatsAppReportsView settings={whatsAppSettings} setSettings={setWhatsAppSettings} invoices={invoices} demands={regularDemands} returns={cashSaleReturns} shopName={profile.shopName || "Dukan Yantra"} />;
       case "ppi":        return <ClosedPPIView cards={ppiCards} setCards={setPpiCards} profile={profile} />;
       case "gst":        return <GSTView profile={profile} />;
-      case "customers":  return <CustomersView customers={customers} setCustomers={setCustomers} profile={profile} marketplaceCustomers={marketplaceCustomers} shopId={localShop.id} marketplaceRecordsError={marketplaceCustomersError} openAddForm={pendingQuickAction === "customer"} onQuickActionHandled={clearPendingQuickAction} />;
+      case "customers":  return <CustomersView customers={customers} setCustomers={setCustomers} onAddCustomer={addCustomer} profile={profile} marketplaceCustomers={marketplaceCustomers} shopId={localShop.id} marketplaceRecordsError={marketplaceCustomersError} openAddForm={pendingQuickAction === "customer"} onQuickActionHandled={clearPendingQuickAction} />;
       case "settings":   return <SettingsView settings={settings} setSettings={setSettings} profile={profile} setProfile={setProfile} isAccountEmailLocked={Boolean(sessionUser.email)} shopId={firebaseUser?.shopId} shopOwnerUid={firebaseUser?.id} gstRegistration={gstRegistration} gstRegistrationLoading={gstRegistrationLoading} onSubmitGstRegistration={handleGstRegistrationSubmission} />;
       case "profile":    return <ProfileView profile={profile} setProfile={setProfile} invoices={invoices} products={products} customers={customers} isAccountEmailLocked={Boolean(sessionUser.email)} />;
       case "reminders":  return <RemindersView reminders={reminders} setReminders={setReminders} />;
@@ -7198,6 +7658,11 @@ function BillingApp({
         </header>
 
         <main className="flex-1 overflow-y-auto p-4 lg:p-6">
+          {marketplaceProductSyncError && (tab === "inventory" || tab === "local_products") && (
+            <p role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              NearBasket product sync failed: {marketplaceProductSyncError}
+            </p>
+          )}
           {renderView()}
         </main>
 

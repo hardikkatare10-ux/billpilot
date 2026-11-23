@@ -43,6 +43,7 @@ export const ShopInventory: React.FC<ShopInventoryProps> = ({ shopId, onRefresh 
   const [editSaleRupees, setEditSaleRupees] = useState<number>(0);
   const [editStock, setEditStock] = useState<number>(0);
   const [editAvailable, setEditAvailable] = useState<boolean>(true);
+  const [editVisible, setEditVisible] = useState<boolean>(true);
   const [editGstRate, setEditGstRate] = useState<number>(5);
   const [editSku, setEditSku] = useState('');
 
@@ -107,6 +108,7 @@ export const ShopInventory: React.FC<ShopInventoryProps> = ({ shopId, onRefresh 
     setEditSaleRupees(l.salePrice ? l.salePrice / 100 : 0);
     setEditStock(l.stockQuantity);
     setEditAvailable(l.isAvailable);
+    setEditVisible(l.isVisible);
     setEditGstRate(l.product.standardGSTRate);
     setEditSku(l.externalBillPilotItemId || '');
   };
@@ -114,6 +116,13 @@ export const ShopInventory: React.FC<ShopInventoryProps> = ({ shopId, onRefresh 
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingListing) return;
+    const sku = editSku.trim().toLowerCase();
+    if (sku && realtimeListings.some((listing) =>
+      listing.id !== editingListing.id && listing.externalBillPilotItemId?.trim().toLowerCase() === sku
+    )) {
+      setSyncError('A product with this SKU already exists in the shared catalogue.');
+      return;
+    }
 
     setIsSaving(true);
     try {
@@ -134,6 +143,7 @@ export const ShopInventory: React.FC<ShopInventoryProps> = ({ shopId, onRefresh 
         salePrice: salePaise,
         stockQuantity: stock,
         isAvailable: isAvail,
+        isVisible: editVisible,
         standardGSTRate: Number(editGstRate),
         externalBillPilotItemId: editSku.trim() || undefined,
       });
@@ -158,6 +168,7 @@ export const ShopInventory: React.FC<ShopInventoryProps> = ({ shopId, onRefresh 
         },
         shopId
       );
+      dbStore.updateListingVisibility(editingListing.id, editVisible);
       setRealtimeListings(dbStore.getListings(shopId));
 
       setEditingListing(null);
@@ -187,6 +198,11 @@ export const ShopInventory: React.FC<ShopInventoryProps> = ({ shopId, onRefresh 
   const handleCreateProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newProdName.trim()) return;
+    const externalId = newSku.trim().toLowerCase();
+    if (externalId && realtimeListings.some((listing) => listing.externalBillPilotItemId?.trim().toLowerCase() === externalId)) {
+      setSyncError('A product with this SKU already exists in the shared catalogue.');
+      return;
+    }
 
     setIsSaving(true);
     try {
@@ -403,10 +419,10 @@ export const ShopInventory: React.FC<ShopInventoryProps> = ({ shopId, onRefresh 
                       <td className="py-3 px-4 text-center">
                         <span
                           className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${
-                            inStock ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
+                            item.isVisible && inStock ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
                           }`}
                         >
-                          {inStock ? 'In Stock' : 'Out of Stock'}
+                          {item.isVisible ? (inStock ? 'Published · In Stock' : 'Published · Out of Stock') : 'Hidden from NearBasket'}
                         </span>
                       </td>
 
@@ -470,6 +486,11 @@ export const ShopInventory: React.FC<ShopInventoryProps> = ({ shopId, onRefresh 
                   className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs"
                 />
               </div>
+
+              <label className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                <input type="checkbox" checked={editVisible} onChange={(e) => setEditVisible(e.target.checked)} />
+                Publish this product to NearBasket customers
+              </label>
 
               <div>
                 <label className="font-semibold text-slate-700 block mb-1">Brand</label>

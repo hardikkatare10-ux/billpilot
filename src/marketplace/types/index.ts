@@ -141,6 +141,7 @@ export interface FirestoreProduct {
   unit: string;
   description: string;
   imageUrl: string;
+  barcode?: string;
   shopPrice: MinorUnits;
   salePrice?: MinorUnits | null;
   stockQuantity: number;

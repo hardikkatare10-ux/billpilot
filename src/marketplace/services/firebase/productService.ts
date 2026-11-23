@@ -37,6 +37,7 @@ export function productToShopListing(p: FirestoreProduct): ShopListing {
       description: p.description || '',
       standardGSTRate: p.standardGSTRate ?? 5,
       imageUrl: p.imageUrl || 'https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=400&q=80',
+      barcode: p.barcode,
     },
     shopPrice: p.shopPrice,
     salePrice: p.salePrice && p.salePrice > 0 ? p.salePrice : undefined,
@@ -84,6 +85,7 @@ export function subscribeToShopProducts(
           unit: data.unit || '1 unit',
           description: data.description || '',
           imageUrl: data.imageUrl || 'https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=400&q=80',
+          barcode: typeof data.barcode === 'string' ? data.barcode : undefined,
           shopPrice: Number(data.shopPrice || 0),
           salePrice: data.salePrice !== undefined && data.salePrice !== null ? Number(data.salePrice) : null,
           stockQuantity: Number(data.stockQuantity || 0),
@@ -127,6 +129,7 @@ export async function createFirestoreProduct(
     unit: string;
     description: string;
     imageUrl?: string;
+    barcode?: string;
     shopPricePaise: number;
     salePricePaise?: number;
     stockQuantity: number;
@@ -155,6 +158,7 @@ export async function createFirestoreProduct(
     imageUrl:
       input.imageUrl?.trim() ||
       'https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=400&q=80',
+    ...(input.barcode?.trim() ? { barcode: input.barcode.trim() } : {}),
     shopPrice: Math.round(Number(input.shopPricePaise)),
     salePrice: input.salePricePaise ? Math.round(Number(input.salePricePaise)) : null,
     stockQuantity: Math.max(0, Number(input.stockQuantity)),

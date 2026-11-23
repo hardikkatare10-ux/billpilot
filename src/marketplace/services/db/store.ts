@@ -755,6 +755,14 @@ class RelationalDatabaseStore {
     return { ...listing };
   }
 
+  public updateListingVisibility(listingId: string, isVisible: boolean): void {
+    const listing = this.state.listings.find((item) => item.id === listingId);
+    if (!listing) return;
+    listing.isVisible = isVisible;
+    listing.updatedAt = new Date().toISOString();
+    this.persist();
+  }
+
   public upsertBillPilotProduct(
     shopId: string,
     input: {
@@ -771,6 +779,7 @@ class RelationalDatabaseStore {
       stockQuantity: number;
       standardGSTRate?: number;
       externalBillPilotItemId?: string;
+      isVisible?: boolean;
     }
   ): { listing: ShopListing; changed: boolean } {
     const shop = this.getShopById(shopId);
@@ -811,10 +820,12 @@ class RelationalDatabaseStore {
       existing.product.unit !== product.unit ||
       existing.product.description !== product.description ||
       existing.product.imageUrl !== product.imageUrl ||
+      existing.product.barcode !== product.barcode ||
       existing.product.standardGSTRate !== product.standardGSTRate ||
       existing.shopPrice !== shopPrice ||
       existing.stockQuantity !== stockQuantity ||
       existing.isAvailable !== isAvailable ||
+      existing.isVisible !== (input.isVisible ?? existing.isVisible ?? true) ||
       existing.externalBillPilotItemId !== externalId;
 
     if (!changed && existing) return { listing: { ...existing, product: { ...existing.product } }, changed };
@@ -829,13 +840,14 @@ class RelationalDatabaseStore {
         shopId,
         productId,
         reservedStock: 0,
-        isVisible: true,
+        isVisible: input.isVisible ?? true,
       }),
       product,
       productId,
       shopPrice,
       stockQuantity,
       isAvailable,
+      isVisible: input.isVisible ?? existing?.isVisible ?? true,
       externalBillPilotItemId: externalId,
       lastSyncedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),

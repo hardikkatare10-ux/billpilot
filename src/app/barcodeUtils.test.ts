@@ -5,6 +5,7 @@ import {
   buildA4LayoutConfig,
   detectBarcodeFormat,
   isValidBarcodeValue,
+  resolveProductBarcode,
   sanitizeBarcodeValue,
 } from './barcodeUtils';
 
@@ -28,6 +29,19 @@ describe('barcode utilities', () => {
     expect(isValidBarcodeValue('A!B#')).toBe(true);
     expect(isValidBarcodeValue('1234567')).toBe(true);
     expect(isValidBarcodeValue('TEST\u0001CODE')).toBe(false);
+  });
+
+  it('preserves saved product barcodes and assigns unique barcodes to products that lack one', () => {
+    const products = [
+      { id: 1, sku: 'SKU-SHOP-001', barcode: '' },
+      { id: 2, sku: 'SHOP-002', barcode: '' },
+      { id: 3, sku: 'SKU-2', barcode: '' },
+      { id: 4, sku: 'SHOP-004', barcode: '8901234567890' },
+    ];
+
+    expect(resolveProductBarcode(products[0], products)).toBe('SKU-SHOP-001');
+    expect(resolveProductBarcode(products[2], products)).toBe('SKU-3');
+    expect(resolveProductBarcode(products[3], products)).toBe('8901234567890');
   });
 
   it('exposes the required A4 label layout presets', () => {
