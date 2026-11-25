@@ -3,6 +3,8 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -30,15 +32,28 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Validate AI discoverability files
+        run: npm run validate:ai
+
       - name: Build
         run: npm run build
 
+      - name: Verify public files in build
+        run: |
+          test -f dist/llms.txt
+          test -f dist/ai-catalog.json
+          test -f dist/.well-known/ard.json
+          test -f dist/robots.txt
+          test -f dist/sitemap.xml
+
       - name: Upload artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: dist
 
   deploy:
+    if: github.event_name != 'pull_request'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

@@ -623,7 +623,7 @@ export const LocationModal: React.FC = () => {
                   {/* Saved Customer Addresses */}
                   {currentUser && currentUser.addresses && currentUser.addresses.length > 0 && (
                     <div className="space-y-1.5 pt-1">
-                      <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
+                      <span className="text-[11px] font-bold text-slate-600 uppercase tracking-wider block">
                         Saved Delivery Addresses
                       </span>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -661,7 +661,7 @@ export const LocationModal: React.FC = () => {
 
                   {/* Popular Test Cities / Prompts */}
                   <div className="space-y-1.5 pt-1">
-                    <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
+                    <span className="text-[11px] font-bold text-slate-600 uppercase tracking-wider block">
                       Quick Suggestions (India)
                     </span>
                     <div className="flex flex-wrap gap-1.5">

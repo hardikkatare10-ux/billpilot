@@ -1,0 +1,11 @@
+# NearBasket
+
+> NearBasket is a local shopping marketplace for discovering nearby shops, browsing products and placing and tracking customer orders.
+
+The marketplace supports location-based shop discovery, shopping carts, checkout, customer order history and delivery information.
+
+## Product resources
+
+- [Marketplace](https://hardikkatare10-ux.github.io/billpilot/consumer): Browse local shops and products.
+- [NearBasket catalog](/nearbasket/ai-catalog.json): Machine-readable product catalog.
+- [Project documentation](https://github.com/hardikkatare10-ux/billpilot): Source code and project information.

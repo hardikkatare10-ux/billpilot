@@ -1,0 +1,11 @@
+# Dukan Yantra
+
+> Dukan Yantra is a business management application for shopkeepers, with billing, inventory, product, customer and invoice capabilities.
+
+The merchant portal supports barcode lookup and scanning, stock management, customer records, invoice generation and local marketplace synchronization.
+
+## Product resources
+
+- [Merchant portal](https://hardikkatare10-ux.github.io/billpilot/shopkeeper/dashboard): Sign in to access merchant billing and inventory tools.
+- [Dukan Yantra catalog](/dukan-yantra/ai-catalog.json): Machine-readable product catalog.
+- [Project documentation](https://github.com/hardikkatare10-ux/billpilot): Source code and setup documentation.

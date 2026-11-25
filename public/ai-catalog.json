@@ -1,0 +1,30 @@
+{
+  "entries": [
+    {
+      "identifier": "urn:air:hardikkatare10-ux:dukan-yantra:web-app",
+      "displayName": "Dukan Yantra",
+      "type": "application/ai-catalog+json",
+      "url": "https://hardikkatare10-ux.github.io/billpilot/dukan-yantra/ai-catalog.json",
+      "representativeQueries": [
+        "How do I create an invoice",
+        "Manage products and inventory",
+        "Scan a barcode for billing"
+      ],
+      "description": "Billing, inventory, barcode, customer and invoice management application for local shopkeepers.",
+      "tags": ["billing", "inventory", "pos", "invoice", "india"]
+    },
+    {
+      "identifier": "urn:air:hardikkatare10-ux:nearbasket:web-app",
+      "displayName": "NearBasket",
+      "type": "application/ai-catalog+json",
+      "url": "https://hardikkatare10-ux.github.io/billpilot/nearbasket/ai-catalog.json",
+      "representativeQueries": [
+        "Find nearby local shops",
+        "Browse products and place an order",
+        "Track a marketplace delivery"
+      ],
+      "description": "Local shopping marketplace for discovering nearby shops, browsing products, placing orders and tracking purchases.",
+      "tags": ["marketplace", "local-shopping", "orders", "delivery", "india"]
+    }
+  ]
+}

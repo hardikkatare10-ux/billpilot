@@ -226,7 +226,7 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
                   </div>
 
                   <div className="py-1">
-                    <span className="px-3 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                    <span className="px-3 py-1 text-[10px] font-bold text-slate-600 uppercase tracking-wider block">
                       Accounts
                     </span>
                     {allUsers.map((u) => (
@@ -285,6 +285,7 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
             <button
               onClick={() => setIsCartDrawerOpen(true)}
               className="inline-flex items-center gap-2 px-3.5 py-2 min-h-11 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg shadow-sm transition-colors cursor-pointer"
+              aria-label={itemCount > 0 ? `Open cart with ${itemCount} items` : 'Open shopping cart'}
             >
               <ShoppingBag className="w-4 h-4" />
               <span className="hidden sm:inline font-tabular">

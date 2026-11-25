@@ -17,6 +17,7 @@
     "dev:backend": "node server/index.js",
     "backend": "node server/index.js",
     "start": "node server/index.js",
+    "validate:ai": "node scripts/validate-ai-discoverability.mjs",
     "test": "vitest run src",
     "test:watch": "vitest"
   },

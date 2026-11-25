@@ -222,7 +222,7 @@ export const ShopDiscovery: React.FC<ShopDiscoveryProps> = ({ shops, onSelectSho
                         <span
                           className={`px-2.5 py-1 rounded-md text-[11px] font-semibold shadow-xs ${
                             isOpen
-                              ? 'bg-emerald-600 text-white'
+                              ? 'bg-emerald-700 text-white'
                               : 'bg-slate-800 text-slate-200'
                           }`}
                         >
@@ -241,12 +241,12 @@ export const ShopDiscovery: React.FC<ShopDiscoveryProps> = ({ shops, onSelectSho
                           <div className="flex items-center gap-1 text-xs font-semibold text-slate-800 font-tabular">
                             <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
                             <span>{shop.rating}</span>
-                            <span className="text-slate-400 font-normal">({shop.reviewCount})</span>
+                            <span className="text-slate-600 font-normal">({shop.reviewCount})</span>
                           </div>
                         </div>
-                        <h3 className="text-lg font-bold text-slate-900 group-hover:text-blue-600 transition-colors mt-1">
+                        <h2 className="text-lg font-bold text-slate-900 group-hover:text-blue-600 transition-colors mt-1">
                           {shop.name}
-                        </h3>
+                        </h2>
                         <p className="text-xs text-slate-500 line-clamp-2 mt-1">
                           {shop.description}
                         </p>

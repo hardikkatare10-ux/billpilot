@@ -1,0 +1,21 @@
+# Dukan Yantra and NearBasket
+
+> Dukan Yantra is a billing, inventory and invoice platform for local shopkeepers. NearBasket is a local shopping marketplace for browsing nearby shops, placing orders and tracking purchases.
+
+Dukan Yantra and NearBasket are presented together in one web application. Dukan Yantra provides merchant billing, inventory, barcode, customer and invoice tools. NearBasket provides local store discovery, shopping, cart, checkout and order tracking.
+
+## Dukan Yantra
+
+- [Dukan Yantra application](https://hardikkatare10-ux.github.io/billpilot/shopkeeper/dashboard): Merchant billing, inventory and store operations.
+- [Dukan Yantra resources](/dukan-yantra/llms.txt): Product-specific machine-readable summary.
+- [AI catalog](/dukan-yantra/ai-catalog.json): Dukan Yantra discovery catalog.
+
+## NearBasket
+
+- [NearBasket marketplace](https://hardikkatare10-ux.github.io/billpilot/consumer): Browse nearby shops and products.
+- [NearBasket resources](/nearbasket/llms.txt): Product-specific machine-readable summary.
+- [AI catalog](/nearbasket/ai-catalog.json): NearBasket discovery catalog.
+
+## Source
+
+- [GitHub repository](https://github.com/hardikkatare10-ux/billpilot): Public source code and project documentation.

@@ -1,0 +1,21 @@
+{
+  "entries": [
+    {
+      "@context": "https://agenticresourcediscovery.org/context/v1",
+      "@id": "urn:air:hardikkatare10-ux:dukan-yantra:web-app",
+      "identifier": "urn:air:hardikkatare10-ux:dukan-yantra:web-app",
+      "displayName": "Dukan Yantra",
+      "type": "application/ai-catalog+json",
+      "url": "https://hardikkatare10-ux.github.io/billpilot/dukan-yantra/ai-catalog.json",
+      "representativeQueries": [
+        "How do I create an invoice",
+        "Manage products and inventory",
+        "Scan a barcode for billing"
+      ],
+      "capabilities": ["billing", "inventory", "invoices", "barcode-scanning", "customer-management"],
+      "description": "Billing, inventory, barcode, customer and invoice management application for local shopkeepers.",
+      "tags": ["billing", "inventory", "pos", "invoice", "india"],
+      "version": "0.1.0"
+    }
+  ]
+}

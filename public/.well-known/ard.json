@@ -1,0 +1,63 @@
+{
+  "entries": [
+    {
+      "@context": "https://agenticresourcediscovery.org/context/v1",
+      "@id": "urn:air:hardikkatare10-ux:dukan-yantra:web-app",
+      "identifier": "urn:air:hardikkatare10-ux:dukan-yantra:web-app",
+      "displayName": "Dukan Yantra",
+      "type": "application/ai-catalog+json",
+      "url": "https://hardikkatare10-ux.github.io/billpilot/dukan-yantra/ai-catalog.json",
+      "representativeQueries": [
+        "How do I create an invoice",
+        "Manage products and inventory",
+        "Scan a barcode for billing"
+      ],
+      "capabilities": [
+        "billing",
+        "inventory",
+        "invoices",
+        "barcode-scanning",
+        "customer-management"
+      ],
+      "description": "Billing, inventory, barcode, customer and invoice management application for local shopkeepers.",
+      "tags": [
+        "billing",
+        "inventory",
+        "pos",
+        "invoice",
+        "india"
+      ],
+      "version": "0.1.0"
+    },
+    {
+      "@context": "https://agenticresourcediscovery.org/context/v1",
+      "@id": "urn:air:hardikkatare10-ux:nearbasket:web-app",
+      "identifier": "urn:air:hardikkatare10-ux:nearbasket:web-app",
+      "displayName": "NearBasket",
+      "type": "application/ai-catalog+json",
+      "url": "https://hardikkatare10-ux.github.io/billpilot/nearbasket/ai-catalog.json",
+      "representativeQueries": [
+        "Find nearby local shops",
+        "Browse products and place an order",
+        "Track a marketplace delivery"
+      ],
+      "capabilities": [
+        "shop-discovery",
+        "product-browsing",
+        "customer-orders",
+        "cart",
+        "checkout",
+        "order-tracking"
+      ],
+      "description": "Local shopping marketplace for discovering nearby shops, browsing products, placing orders and tracking purchases.",
+      "tags": [
+        "marketplace",
+        "local-shopping",
+        "orders",
+        "delivery",
+        "india"
+      ],
+      "version": "0.1.0"
+    }
+  ]
+}

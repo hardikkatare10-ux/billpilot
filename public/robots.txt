@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://hardikkatare10-ux.github.io/billpilot/sitemap.xml

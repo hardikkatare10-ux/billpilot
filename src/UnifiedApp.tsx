@@ -433,7 +433,7 @@ const MainAppContent: React.FC = () => {
             if (t === 'orders') navigate('/consumer/orders');
           }}
         />
-        <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-6 space-y-8">
+        <main id="main-content" className="flex-1 max-w-7xl w-full mx-auto px-4 py-6 space-y-8">
           <div className="flex items-center justify-between border-b border-slate-200 pb-4">
             <div>
               <h1 className="text-xl font-black text-slate-900">Marketplace Administration</h1>
@@ -514,7 +514,7 @@ const MainAppContent: React.FC = () => {
       />
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6">
+      <main id="main-content" className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6">
         {/* Tracking single order modal / view */}
         {trackedOrder && (
           <div className="mb-6">
@@ -593,19 +593,27 @@ const MainAppContent: React.FC = () => {
 
 export default function UnifiedApp() {
   return (
-    <ConnectivityProvider>
-      <ConnectivityBanner />
-      <APIProvider apiKey={GOOGLE_MAPS_API_KEY}>
-        <UnifiedAuthProvider>
-          <AuthProvider>
-            <LocationProvider>
-              <CartProvider>
-                <MainAppContent />
-              </CartProvider>
-            </LocationProvider>
-          </AuthProvider>
-        </UnifiedAuthProvider>
-      </APIProvider>
-    </ConnectivityProvider>
+    <>
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-[100] focus:rounded-lg focus:bg-white focus:px-4 focus:py-3 focus:text-sm focus:font-bold focus:text-slate-900 focus:shadow-lg"
+      >
+        Skip to main content
+      </a>
+      <ConnectivityProvider>
+        <ConnectivityBanner />
+        <APIProvider apiKey={GOOGLE_MAPS_API_KEY}>
+          <UnifiedAuthProvider>
+            <AuthProvider>
+              <LocationProvider>
+                <CartProvider>
+                  <MainAppContent />
+                </CartProvider>
+              </LocationProvider>
+            </AuthProvider>
+          </UnifiedAuthProvider>
+        </APIProvider>
+      </ConnectivityProvider>
+    </>
   );
 }
